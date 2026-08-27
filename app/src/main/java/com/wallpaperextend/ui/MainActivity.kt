@@ -16,17 +16,15 @@ import com.wallpaperextend.databinding.ActivityMainBinding
 import com.wallpaperextend.processor.WallpaperProcessor
 import com.wallpaperextend.util.ImageLoader
 import com.wallpaperextend.util.ImageSaver
+import kotlin.math.roundToInt
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var binding: ActivityMainBinding
-
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
-
     // 可调参数
     private var blurRadius = 30
     private var extendRatio = 0.25f
@@ -42,7 +40,7 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 存储权限回调（Android 12- 需要；Android 13+ 用 READ_MEDIA_IMAGES，这里仅触发请求）
+    // 存储权限回调
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -57,7 +55,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
         setupUI()
         handleSharedIntent()
     }
@@ -71,7 +68,6 @@ class MainActivity : AppCompatActivity() {
             }
             pickImage.launch(intent)
         }
-
         // 下载/保存按钮
         binding.btnSave.setOnClickListener {
             if (processedBitmap == null) {
@@ -80,7 +76,6 @@ class MainActivity : AppCompatActivity() {
             }
             checkPermissionAndSave()
         }
-
         // 参数调节：模糊半径
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -90,17 +85,15 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekBlur.progress = blurRadius
-
         // 延展比例
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 extendRatio = progress / 100f
-                binding.tvExtend.text = "延展比例: ${(extendRatio * 100).roundToInt()}%"
+                binding.tvExtend.text = "延展比例: ${extendRatio * 100.roundToInt()}%"
                 if (fromUser) reprocess()
             }
         })
         binding.seekExtend.progress = (extendRatio * 100).roundToInt()
-
         // 羽化宽度
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
@@ -133,13 +126,13 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 参数变化后重新处理（防抖） */
+        /** 参数变化后重新处理（防抖） */
     private var reprocessJob: kotlinx.coroutines.Job? = null
     private fun reprocess() {
         if (originalBitmap == null) return
         reprocessJob?.cancel()
         reprocessJob = lifecycleScope.launch {
-            kotlinx.coroutines.delay(150) // 防抖
+            kotlinx.coroutines.delay(150)
             processImage()
         }
     }
@@ -165,15 +158,11 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionAndSave() {
-        // Android 13+ 不需要 WRITE_EXTERNAL_STORAGE；Android 12- 需要
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // Android 13+：MediaStore 自动授权，直接保存
             saveCurrent()
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            // Android 10-12：也不需要 WRITE（用 MediaStore）
             saveCurrent()
         } else {
-            // Android 9-：请求 WRITE_EXTERNAL_STORAGE
             requestPermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
@@ -185,7 +174,6 @@ class MainActivity : AppCompatActivity() {
                 ImageSaver.saveToGallery(this@MainActivity, bmp)
             }
             if (path != null) {
-                // 可选：分享
                 binding.btnShare.visibility = View.VISIBLE
                 binding.btnShare.setOnClickListener { shareImage(path) }
             }
