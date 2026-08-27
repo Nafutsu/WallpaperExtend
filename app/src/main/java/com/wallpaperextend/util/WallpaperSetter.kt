@@ -39,7 +39,7 @@ object WallpaperSetter {
                         manager.setBitmap(bitmap, null, true, WallpaperManager.FLAG_LOCK)
                     } else {
                         @Suppress("DEPRECATION")
-                        manager.setLockWallpaperBitmap(bitmap)
+                        manager.setBitmap(bitmap)
                     }
                 }
                 TARGET_BOTH -> {
