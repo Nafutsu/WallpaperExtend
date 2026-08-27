@@ -85,15 +85,15 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekBlur.progress = blurRadius
-        // 延展比例
+                // 延展比例
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 extendRatio = progress / 100f
-                binding.tvExtend.text = "延展比例: ${extendRatio * 100.roundToInt()}%"
+                binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
                 if (fromUser) reprocess()
             }
         })
-        binding.seekExtend.progress = (extendRatio * 100).roundToInt()
+        binding.seekExtend.progress = (extendRatio * 100).toInt()
         // 羽化宽度
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
