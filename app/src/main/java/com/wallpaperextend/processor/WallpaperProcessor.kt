@@ -8,6 +8,8 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Shader
+import kotlin.math.max
+import kotlin.math.min
 import kotlin.math.roundToInt
 
 object WallpaperProcessor {
@@ -15,31 +17,21 @@ object WallpaperProcessor {
     enum class Mode { LIGHT, DARK }
 
     data class Config(
-        val blurRadius: Int = 56,
-        val extendRatio: Float = 0.32f,
+        val blurRadius: Int = 30,
+        val extendRatio: Float = 0.25f,
         val featherWidth: Int = 120,
-        val topOnly: Boolean = true,   // 现在固定 true，保留字段兼容旧调用
+        val topOnly: Boolean = true,
         val mode: Mode = Mode.LIGHT
     )
 
-    /**
-     * @param src      原始图片
-     * @param targetW  输出宽度（一般 = 屏幕宽）
-     * @param targetH  输出高度（一般 = 屏幕高）
-     */
     fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
-        // 1. 保证不透明，避免模糊产生彩色拖影
         val safe = ensureOpaque(src)
-
-        // 2. 等比缩放到目标宽度
         val scaled = scaleToWidth(safe, targetW)
         val srcW = scaled.width
         val srcH = scaled.height
 
-        // 3. 只顶部延展
         val topH = (targetH * config.extendRatio.coerceIn(0f, 0.6f)).roundToInt().coerceAtLeast(0)
-        val mainTop = topH
-        val outH = targetH
+        val outH = (topH + srcH).coerceAtLeast(targetH)
 
         val out = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
@@ -47,31 +39,29 @@ object WallpaperProcessor {
 
         val drawX = ((targetW - srcW) / 2f).coerceAtLeast(0f)
 
-        // 4. 顶部氛围延展区（严格 clip 在 [0, topH]）
-        drawTopExtension(canvas, scaled, targetW, topH, config)
+        if (topH > 0) {
+            drawTopExtension(canvas, scaled, targetW, topH, config)
+        }
 
-        // 5. 画主体
-        canvas.drawBitmap(scaled, drawX, mainTop.toFloat(), null)
+        canvas.drawBitmap(scaled, drawX, topH.toFloat(), null)
 
-        // 6. 顶部羽化融合（严格 clip 在 [mainTop-feather, mainTop]）
-        drawTopFeather(canvas, targetW, mainTop, config.featherWidth.coerceAtLeast(1))
+        if (topH > 0) {
+            drawTopFeather(canvas, targetW, topH, config.featherWidth.coerceAtLeast(1))
+        }
 
-        // 回收临时
         if (safe !== src) safe.recycle()
         if (scaled !== src && scaled !== safe) scaled.recycle()
 
         return out
     }
 
-    /* ===================== 内部实现 ===================== */
+    /* ================= 内部 ================= */
 
     private fun backgroundBaseColor(mode: Mode): Int =
         if (mode == Mode.DARK) Color.rgb(18, 20, 24) else Color.rgb(245, 248, 252)
 
-    /** 透明像素会导致栈模糊把边缘"透明"混入产生彩边，先垫白底转不透明 */
     private fun ensureOpaque(src: Bitmap): Bitmap {
-        if (src.hasAlpha().not()) return src
-        // 抽样检查是否真的有透明像素
+        if (!src.hasAlpha()) return src
         val step = 8.coerceAtLeast(src.width / 32)
         for (y in 0 until src.height step step) {
             for (x in 0 until src.width step step) {
@@ -99,10 +89,9 @@ object WallpaperProcessor {
         val baseColor = sampleAtmosphereColor(src, config.mode)
         canvas.drawColor(baseColor)
 
-        // 取原图顶部 28% 做模糊氛围
         val sliceH = (src.height * 0.28f).roundToInt().coerceAtLeast(1).coerceAtMost(src.height)
         val slice = Bitmap.createBitmap(src, 0, 0, src.width, sliceH)
-        val blur = stackBlur(scaleToWidth(slice, w), config.blurRadius.coerceIn(0, 120))
+        val blur = stackBlur(scaleToWidth(slice, w), config.blurRadius)
         slice.recycle()
 
         val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
@@ -110,7 +99,6 @@ object WallpaperProcessor {
         }
         canvas.drawBitmap(blur, 0f, 0f, paint)
 
-        // 顶部往下的轻微提亮渐变，让时钟区干净
         val grad = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
                 0f, 0f, 0f, topH.toFloat(),
@@ -188,99 +176,127 @@ object WallpaperProcessor {
         return Bitmap.createScaledBitmap(src, targetW, targetH, true)
     }
 
-    /* ===================== 栈模糊（不依赖 RenderScript） ===================== */
+    /* ================= 安全的栈模糊（模运算防越界） ================= */
 
     private fun stackBlur(s: Bitmap, radius: Int): Bitmap {
-        if (radius <= 0) return s
         val r = radius.coerceIn(1, 255)
         val w = s.width
         val h = s.height
-        val pix = IntArray(w * h)
-        s.getPixels(pix, 0, w, 0, 0, w, h)
-        stackBlur(pix, w, h, r)
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        out.setPixels(pix, 0, w, 0, 0, w, h)
-        if (out !== s) s.recycle()
+        if (w <= 0 || h <= 0) return s
+
+        // 超大图先缩小再模糊，避免 OOM + 索引溢出
+        val MAX_DIM = 1024
+        val work = if (max(w, h) > MAX_DIM) {
+            val scale = MAX_DIM.toFloat() / max(w, h)
+            Bitmap.createScaledBitmap(
+                s,
+                (w * scale).roundToInt().coerceAtLeast(1),
+                (h * scale).roundToInt().coerceAtLeast(1),
+                true
+            )
+        } else {
+            s
+        }
+        val ww = work.width
+        val hh = work.height
+        val size = ww * hh
+
+        val pixels = IntArray(size)
+        work.getPixels(pixels, 0, ww, 0, 0, ww, hh)
+
+        // 半径按实际尺寸再钳制，保证 2*radius+1 <= min(w,h)
+        val maxRad = (min(ww, hh) - 1) / 2
+        val rad = min(r, maxRad).coerceAtLeast(1)
+
+        try {
+            stackBlurH(pixels, ww, hh, rad)
+            stackBlurV(pixels, ww, hh, rad)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        val out = Bitmap.createBitmap(ww, hh, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, ww, 0, 0, ww, hh)
+
+        if (work !== s) work.recycle()
         return out
     }
 
-    private fun stackBlur(pix: IntArray, w: Int, h: Int, radius: Int) {
-        val wm = w - 1
-        val hm = h - 1
-        val wh = w * h
-        val div = radius + radius + 1
-
-        val r = IntArray(wh)
-        val g = IntArray(wh)
-        val b = IntArray(wh)
-        val a = IntArray(wh)
-
-        for (i in 0 until wh) {
-            val p = pix[i]
-            r[i] = Color.red(p)
-            g[i] = Color.green(p)
-            b[i] = Color.blue(p)
-            a[i] = Color.alpha(p)
-        }
-
-        var yw = 0
-        val vMin = IntArray(Math.max(w, h))
-
-        // ===== 横向 pass =====
-        var divSum = (div + 1) shr 1
-        divSum *= divSum
+    /** 横向栈模糊：用模运算保证索引永不越界 */
+    private fun stackBlurH(pixels: IntArray, w: Int, h: Int, radius: Int) {
+        val div = (2 * radius + 1).coerceAtLeast(1)
+        val divSum = ((div + 1) shr 1) * ((div + 1) shr 1)
         val dv = IntArray(256 * divSum)
         for (i in dv.indices) dv[i] = i / divSum
+        val maxVal = 255 * divSum
+
+        val rSum = IntArray(w)
+        val gSum = IntArray(w)
+        val bSum = IntArray(w)
+        val aSum = IntArray(w)
 
         for (y in 0 until h) {
             var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
             for (i in -radius..radius) {
-                val p = pix[yw + (i + w) % w]
+                val xi = (i + w) % w
+                val p = pixels[y * w + xi]
                 sumR += Color.red(p); sumG += Color.green(p); sumB += Color.blue(p); sumA += Color.alpha(p)
             }
             for (x in 0 until w) {
-                r[yw + x] = dv[sumR.coerceIn(0, 255 * div)]
-                g[yw + x] = dv[sumG.coerceIn(0, 255 * div)]
-                b[yw + x] = dv[sumB.coerceIn(0, 255 * div)]
-                a[yw + x] = dv[sumA.coerceIn(0, 255 * div)]
+                val yi = y * w + x
+                pixels[yi] = Color.argb(
+                    dv[sumA.coerceIn(0, maxVal)],
+                    dv[sumR.coerceIn(0, maxVal)],
+                    dv[sumG.coerceIn(0, maxVal)],
+                    dv[sumB.coerceIn(0, maxVal)]
+                )
 
-                val xi1 = x + radius + 1
-                val xi2 = x - radius
-                val p1 = pix[yw + if (xi1 <= wm) xi1 else xi1 - w]
-                val p2 = pix[yw + if (xi2 >= 0) xi2 else xi2 + w]
-                sumR += Color.red(p1) - Color.red(p2)
-                sumG += Color.green(p1) - Color.green(p2)
-                sumB += Color.blue(p1) - Color.blue(p2)
-                sumA += Color.alpha(p1) - Color.alpha(p2)
+                val xiOut = (x - radius + w) % w
+                val xiIn = (x + radius + 1 + w) % w
+
+                val pOut = pixels[y * w + xiOut]
+                val pIn = pixels[y * w + xiIn]
+
+                sumR += Color.red(pIn) - Color.red(pOut)
+                sumG += Color.green(pIn) - Color.green(pOut)
+                sumB += Color.blue(pIn) - Color.blue(pOut)
+                sumA += Color.alpha(pIn) - Color.alpha(pOut)
             }
-            yw += w
         }
+    }
 
-        // ===== 纵向 pass =====
-        yw = 0
+    /** 纵向栈模糊：用模运算保证索引永不越界 */
+    private fun stackBlurV(pixels: IntArray, w: Int, h: Int, radius: Int) {
+        val div = (2 * radius + 1).coerceAtLeast(1)
+        val divSum = ((div + 1) shr 1) * ((div + 1) shr 1)
+        val dv = IntArray(256 * divSum)
+        for (i in dv.indices) dv[i] = i / divSum
+        val maxVal = 255 * divSum
+
         for (x in 0 until w) {
             var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
             for (i in -radius..radius) {
-                val idx = (i + h) % h
-                val yi = idx * w + x
-                sumR += r[yi]; sumG += g[yi]; sumB += b[yi]; sumA += a[yi]
+                val yi = ((i + h) % h) * w + x
+                sumR += Color.red(pixels[yi]); sumG += Color.green(pixels[yi])
+                sumB += Color.blue(pixels[yi]); sumA += Color.alpha(pixels[yi])
             }
             for (y in 0 until h) {
-                val outIdx = yw + x
-                pix[outIdx] = Color.argb(dv[sumA], dv[sumR], dv[sumG], dv[sumB])
+                val yi = y * w + x
+                pixels[yi] = Color.argb(
+                    dv[sumA.coerceIn(0, maxVal)],
+                    dv[sumR.coerceIn(0, maxVal)],
+                    dv[sumG.coerceIn(0, maxVal)],
+                    dv[sumB.coerceIn(0, maxVal)]
+                )
 
-                val yi1 = y + radius + 1
-                val yi2 = y - radius
-                val idx1 = if (yi1 <= hm) yi1 else yi1 - h
-                val idx2 = if (yi2 >= 0) yi2 else yi2 + h
-                val p1 = idx1 * w + x
-                val p2 = idx2 * w + x
-                sumR += r[p1] - r[p2]
-                sumG += g[p1] - g[p2]
-                sumB += b[p1] - b[p2]
-                sumA += a[p1] - a[p2]
+                val yiOut = ((y - radius + h) % h) * w + x
+                val yiIn = ((y + radius + 1 + h) % h) * w + x
+
+                sumR += Color.red(pixels[yiIn]) - Color.red(pixels[yiOut])
+                sumG += Color.green(pixels[yiIn]) - Color.green(pixels[yiOut])
+                sumB += Color.blue(pixels[yiIn]) - Color.blue(pixels[yiOut])
+                sumA += Color.alpha(pixels[yiIn]) - Color.alpha(pixels[yiOut])
             }
-            yw += w
         }
     }
 }
