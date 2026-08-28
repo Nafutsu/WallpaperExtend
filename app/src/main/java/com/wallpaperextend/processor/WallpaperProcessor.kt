@@ -1,4 +1,4 @@
-package com.example.wallpaper
+package com.wallpaperextend.processor
 
 import android.graphics.Bitmap
 import android.graphics.Canvas
@@ -13,7 +13,6 @@ import kotlin.math.roundToInt
 
 object WallpaperProcessor {
 
-    // 降级模糊半径（如果计算过大则限制在此）
     private const val MAX_BLUR_RADIUS = 50
 
     /**
@@ -23,7 +22,7 @@ object WallpaperProcessor {
         original: Bitmap,
         targetW: Int,
         targetH: Int,
-        extendRatio: Float = 0.3f, // 延展区占目标高度的比例
+        extendRatio: Float = 0.3f,
         blurRadius: Int = 30
     ): Bitmap? {
         if (original.isRecycled) return null
@@ -31,7 +30,6 @@ object WallpaperProcessor {
         val scaledBitmap = Bitmap.createScaledBitmap(original, targetW, targetH, true)
         val scaledH = scaledBitmap.height
 
-        // 如果原图已经够高，直接返回缩放后的图
         if (scaledH >= targetH) {
             return scaledBitmap
         }
@@ -42,7 +40,7 @@ object WallpaperProcessor {
         val result = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
 
-        // 1. 提取原图顶部条带 (高度取50或原图高度的10%)
+        // 1. 提取原图顶部条带
         val topStripH = 50.coerceAtMost(original.height / 10)
         val topStrip = Bitmap.createBitmap(original, 0, 0, original.width, topStripH)
 
@@ -56,10 +54,10 @@ object WallpaperProcessor {
         // 4. 绘制模糊延展区
         canvas.drawBitmap(blurred, 0f, 0f, null)
 
-        // 5. 提取顶部主色调，用于渐变遮罩的终点色
+        // 5. 提取顶部主色调
         val baseColor = getAverageColor(topStrip)
 
-        // 6. 创建线性渐变遮罩：顶部透明 -> 底部主色调 (实现平滑过渡)
+        // 6. 渐变遮罩：顶部透明 → 底部主色调
         val gradient = LinearGradient(
             0f, 0f,
             0f, extendH.toFloat(),
@@ -76,7 +74,7 @@ object WallpaperProcessor {
         // 7. 应用渐变遮罩
         canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), maskPaint)
 
-        // 8. 绘制原图 (紧贴延展区下方)
+        // 8. 绘制原图
         val srcDrawY = extendH
         canvas.drawBitmap(scaledBitmap, 0f, srcDrawY.toFloat(), null)
 
@@ -89,12 +87,8 @@ object WallpaperProcessor {
         return result
     }
 
-    /**
-     * 动态提取图片平均颜色（用于渐变基底）
-     */
     private fun getAverageColor(bitmap: Bitmap): Int {
         if (bitmap.isRecycled) return Color.WHITE
-        // 缩小以提升计算速度
         val smallBmp = Bitmap.createScaledBitmap(bitmap, 10, 10, true)
         var r = 0L
         var g = 0L
@@ -112,16 +106,12 @@ object WallpaperProcessor {
         return Color.rgb((r / count).toInt(), (g / count).toInt(), (b / count).toInt())
     }
 
-    /**
-     * Java栈模糊实现 (保留原有逻辑并优化边界)
-     */
-    fun stackBlur(sentBitmap: Bitmap, radius: Int): Bitmap {
+    private fun stackBlur(sentBitmap: Bitmap, radius: Int): Bitmap {
         if (radius < 1) return sentBitmap
         val bitmap = Bitmap.createBitmap(sentBitmap)
 
         val w = bitmap.width
         val h = bitmap.height
-
         val pix = IntArray(w * h)
         bitmap.getPixels(pix, 0, w, 0, 0, w, h)
 
@@ -156,7 +146,6 @@ object WallpaperProcessor {
 
         yi = 0
         yw = yi
-
         val stack = Array(div) { IntArray(3) }
         var stackpointer: Int
         var stackstart: Int
