@@ -5,6 +5,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.HardwareRenderer
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
@@ -17,15 +18,32 @@ import android.hardware.HardwareBuffer
 import android.media.ImageReader
 import android.os.Build
 import androidx.annotation.RequiresApi
-import kotlin.math.ceil
+import com.wallpaperextend.processor.ai.ExtendStrategy
 import kotlin.math.max
 import kotlin.math.min
-import android.graphics.LinearGradient
 
+/**
+ * RenderEffect 方案（minSdk 31 可用，系统级 GPU 模糊）。
+ * 实现 ExtendStrategy 接口，可被 WallpaperExtendEngine 统一调度。
+ */
 @RequiresApi(Build.VERSION_CODES.S)
-object RenderEffectWallpaperProcessor {
+object RenderEffectWallpaperProcessor : ExtendStrategy {
 
-    fun process(
+    override fun isAvailable(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+
+    override fun name(): String = "RenderEffect-GPU"
+
+    override suspend fun extend(
+        context: Context,
+        src: Bitmap,
+        targetW: Int,
+        targetH: Int,
+        config: WallpaperConfig
+    ): Bitmap {
+        return processInternal(context, src, targetW, targetH, config)
+    }
+
+    private fun processInternal(
         context: Context,
         src: Bitmap,
         targetW: Int,
@@ -34,16 +52,13 @@ object RenderEffectWallpaperProcessor {
     ): Bitmap {
         val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt()
 
-        // 画布就是目标尺寸
         val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(sampleTopEdgeColor(src))
 
-        // 取原图顶部边缘
         val edgeH = max(50, (src.height * 0.1).toInt())
         val edgeSrc = Bitmap.createBitmap(src, 0, 0, src.width, min(edgeH, src.height))
 
-        // 先拉伸到目标宽度再模糊，避免二次拉伸
         val stretched = Bitmap.createScaledBitmap(edgeSrc, targetW, extendH, true)
         val blurred = blurWithRenderEffect(stretched, config.blurRadius)
         stretched.recycle()
@@ -62,13 +77,12 @@ object RenderEffectWallpaperProcessor {
             }
         }
 
-        // 先画蒙版再画模糊层
         val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = overlayColor }
         canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
         canvas.drawBitmap(blurred, 0f, 0f, null)
         blurred.recycle()
 
-        // 羽化：延展区底部渐变消失，和原图融合
+        // 羽化融合
         val feather = config.featherWidth.coerceIn(50, extendH)
         if (feather > 0) {
             val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -94,7 +108,7 @@ object RenderEffectWallpaperProcessor {
             canvas.restoreToCount(layerId)
         }
 
-        // 画原图（从 extendH 开始，紧接延展区）
+        // 原图从 extendH 开始
         val srcScaledH = (targetW.toFloat() / src.width * src.height).toInt()
         canvas.drawBitmap(
             src, null,
@@ -105,7 +119,6 @@ object RenderEffectWallpaperProcessor {
         return out
     }
 
-    // ★ 系统级 RenderEffect 离屏模糊
     private fun blurWithRenderEffect(src: Bitmap, radius: Float): Bitmap {
         val r = radius.coerceIn(1f, 25f)
         val width = src.width
