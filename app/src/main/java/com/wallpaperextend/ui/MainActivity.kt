@@ -5,6 +5,7 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.os.Build
 import android.os.Bundle
+import android.view.ScaleGestureDetector
 import android.view.View
 import android.widget.SeekBar
 import android.widget.Toast
@@ -22,16 +23,23 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
+
     private lateinit var binding: ActivityMainBinding
+
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
+
+    // ====== 参数 ======
     private var blurRadius = 30
-    private var extendRatio = 0.25f
-    private var featherWidth = 120
-    private var topOnly = true
-    private var targetHeight = 0
-    private var srcWidth = 0
-    private var srcHeight = 0
+    private var extendRatio = 0.25f      // 仅作为"最大延展高度占比"上限，实际延展高度自动算
+    private var featherWidth = 100
+    private var topOnly = true           // iOS 风格恒为 true，保留字段
+    private var targetHeight = 0        // 0 = 自动取屏幕高度
+
+    // 双指缩放：scale 越大，原图缩得越小，顶部延展区越高（模拟 iOS 捏合）
+    private var userScale = 1.0f        // 1.0 = 铺满宽度；>1 表示用户缩小
+    private val minScale = 1.0f
+    private val maxScale = 1.6f
 
     private val pickImage = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
@@ -52,10 +60,36 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // 双指缩放检测（作用在结果预览图上）
+    private lateinit var scaleDetector: ScaleGestureDetector
+    private val onScaleListener = object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+        override fun onScale(detector: ScaleGestureDetector): Boolean {
+            val newScale = (userScale * detector.scaleFactor).coerceIn(minScale, maxScale)
+            if (kotlin.math.abs(newScale - userScale) > 0.01f) {
+                userScale = newScale
+                // 把缩放量映射到 extendRatio，让延展高度随缩放变化
+                // scale 1.0 -> ratio ~0；scale 1.6 -> ratio ~0.3
+                extendRatio = ((userScale - minScale) / (maxScale - minScale) * 0.3f)
+                    .coerceIn(0f, 0.6f)
+                binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
+                reprocess()
+            }
+            return true
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
+
+        scaleDetector = ScaleGestureDetector(this, onScaleListener)
+        // 把缩放手势挂到预览 ImageView 上（需布局里 imgResult 允许缩放，见下方说明）
+        binding.imgResult.setOnTouchListener { _, event ->
+            scaleDetector.onTouchEvent(event)
+            true
+        }
+
         setupUI()
         handleSharedIntent()
     }
@@ -75,16 +109,18 @@ class MainActivity : AppCompatActivity() {
             }
             checkPermissionAndSave()
         }
-        binding.cbTopOnly.setOnCheckedChangeListener { _, checked ->
-            topOnly = checked
-            reprocess()
-        }
+
+        // topOnly 开关：iOS 风格固定仅顶部，勾选框保留但恒为 true，禁用即可
+        binding.cbTopOnly.isEnabled = false
+        binding.cbTopOnly.isChecked = true
+
         binding.etTargetHeight.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) {
                 updateTargetHeight()
                 reprocess()
             }
         }
+
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 blurRadius = progress.coerceAtLeast(1)
@@ -93,14 +129,18 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekBlur.progress = blurRadius
+
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                // 手动拖动滑块时，同步更新 userScale，保持双向一致
                 extendRatio = progress / 100f
+                userScale = (extendRatio / 0.3f).coerceIn(0f, 1f) * (maxScale - minScale) + minScale
                 binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
                 if (fromUser) reprocess()
             }
         })
         binding.seekExtend.progress = (extendRatio * 100).toInt()
+
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 featherWidth = progress
@@ -113,6 +153,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateTargetHeight() {
         val value = binding.etTargetHeight.text.toString().toIntOrNull()
+        // 0 或留空 = 自动取屏幕高度（推荐，底部对齐逻辑才准确）
         targetHeight = if (value != null && value > 0) value else 0
     }
 
@@ -129,11 +170,9 @@ class MainActivity : AppCompatActivity() {
             val bmp = withContext(Dispatchers.IO) {
                 ImageLoader.loadFromUri(this@MainActivity, uri)
             }
-            srcWidth = bmp.width
-            srcHeight = bmp.height
-            binding.tvSize.text = "原图尺寸: ${srcWidth} × ${srcHeight}"
+            binding.tvSize.text = "原图尺寸: ${bmp.width} × ${bmp.height}"
             if (binding.etTargetHeight.text.isNullOrBlank()) {
-                binding.etTargetHeight.hint = "默认 ${srcHeight}（=原高+延展）"
+                binding.etTargetHeight.hint = "默认 = 屏幕高度（iOS 风格底部对齐）"
             }
             originalBitmap?.recycleSafe()
             originalBitmap = bmp
@@ -158,6 +197,7 @@ class MainActivity : AppCompatActivity() {
         binding.progress.visibility = View.VISIBLE
         val result = withContext(Dispatchers.Default) {
             val screenW = resources.displayMetrics.widthPixels
+            // targetHeight = 0 时自动取屏幕高度，确保"底部对齐 + 顶部延展"准确
             val refH = targetHeight.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
             WallpaperProcessor.process(
                 src = src,
@@ -167,7 +207,7 @@ class MainActivity : AppCompatActivity() {
                     blurRadius = blurRadius,
                     extendRatio = extendRatio,
                     featherWidth = featherWidth,
-                    topOnly = topOnly
+                    topOnly = true // 固定仅顶部延展，对齐 iOS
                 )
             )
         }
@@ -239,7 +279,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun Bitmap?.recycleSafe() {
         if (this != null && !isRecycled) {
-            try { recycle() } catch (_: Exception) {}
+            try {
+                recycle()
+            } catch (_: Exception) {
+            }
         }
     }
 
