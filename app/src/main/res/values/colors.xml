@@ -1,9 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="background">#FF1C1C1E</color>
-    <color name="card">#FF2C2C2E</color>
+    <color name="background">#FF1C1C1E</color>        <!-- 深色背景 -->
+    <color name="card">#FF2C2C2E</color>             <!-- 卡片背景 -->
     <color name="text_primary">#FFFFFFFF</color>
-    <color name="text_secondary">#FFAAAAAA</color>
-    <color name="primary">#FF0A84FF</color>
-    <color name="secondary">#FF30D158</color>
+    <color name="text_secondary">#FFB0B0B0</color>
+    <color name="primary">#FF0A84FF</color>           <!-- 主色（蓝） -->
+    <color name="secondary">#FF34C759</color>         <!-- 次色（绿） -->
 </resources>
