@@ -3,8 +3,8 @@ package com.wallpaperextend.processor
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
-import com.wallpaperextend.processor.ai.ExtendStrategy
-import com.wallpaperextend.processor.ai.NpuExtendEngine
+import com.wallpaperextend.processor.NPU.ExtendStrategy
+import com.wallpaperextend.processor.NPU.NpuExtendEngine
 
 /**
  * 统一延展引擎：自动选择最优策略。

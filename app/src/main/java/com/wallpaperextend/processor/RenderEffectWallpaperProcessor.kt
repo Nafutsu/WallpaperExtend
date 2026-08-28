@@ -18,6 +18,7 @@ import android.hardware.HardwareBuffer
 import android.media.ImageReader
 import android.os.Build
 import androidx.annotation.RequiresApi
+import com.wallpaperextend.processor.NPU.ExtendStrategy
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
