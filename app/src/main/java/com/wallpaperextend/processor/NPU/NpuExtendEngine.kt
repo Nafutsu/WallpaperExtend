@@ -14,6 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.FloatBuffer
 
+// ★ 修复1：导入 NNAPIFlags（SessionOptions 的内部类，用完整路径引用）
+import ai.onnxruntime.OrtSession.SessionOptions.NNAPIFlags
+
 /**
  * NPU 神经网络延展引擎（方案一 + 选择1：LaMa ONNX + 端侧推理）
  *
@@ -52,9 +55,9 @@ class NpuExtendEngine(
         try {
             env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
-                // ★ 修复1：addNnapi 接收 EnumSet<NNAPIFlags>，空集合 = 默认配置
+                // ★ 修复1：addNnapi(EnumSet<NNAPIFlags>) — 使用导入的 NNAPIFlags
                 @Suppress("UNCHECKED_CAST")
-                addNnapi(java.util.EnumSet.noneOf(ai.onnxruntime.OrtSession.SessionOptions.NNAPIFlags::class.java))
+                addNnapi(java.util.EnumSet.noneOf(NNAPIFlags::class.java))
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
             val modelBytes = context.assets.open(MODEL_PATH).readBytes()
@@ -107,13 +110,11 @@ class NpuExtendEngine(
         // 6. ★ NPU 推理
         val inputs = mapOf("image" to imageTensor, "mask" to maskTensor)
         val outputs = ortSession.run(inputs)
-        // ★ 修复2：用 outputs[0] 取第一个输出，再 .get().value
-        val resultTensor = outputs[0]
-        @Suppress("UNCHECKED_CAST")
-        val resultArray = resultTensor.get().value as Array<Array<Array<FloatArray>>>
-
-        // 7. Tensor → Bitmap
-        val generated512 = tensorToBitmap(resultArray, INPUT_SIZE, INPUT_SIZE)
+        // ★ 修复2：OrtSession.Result 用 get(int) 取 OnnxTensor，再用 floatBuffer 读数据
+        val resultTensor = outputs[0] as OnnxTensor
+        val resultBuffer = resultTensor.floatBuffer
+        // 将 FloatBuffer 转为 4D 数组 [1, 3, H, W]
+        val generated512 = floatBufferToBitmap(resultBuffer, INPUT_SIZE, INPUT_SIZE)
 
         // 8. 拼接：生成的顶部延展区 + 原图
         val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
@@ -172,19 +173,22 @@ class NpuExtendEngine(
         return OnnxTensor.createTensor(env!!, buffer, longArrayOf(1, 1, h.toLong(), w.toLong()))
     }
 
-    private fun tensorToBitmap(
-        tensor: Array<Array<Array<FloatArray>>>,
+    private fun floatBufferToBitmap(
+        buffer: java.nio.FloatBuffer,
         w: Int,
         h: Int
     ): Bitmap {
+        // buffer 布局：[1, 3, H, W]，即 R/G/B 三个平面依次排列
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(w * h)
+        val planeSize = w * h
         for (y in 0 until h) {
             for (x in 0 until w) {
-                val r = ((tensor[0][0][y][x] + 1f) * 127.5f).toInt().coerceIn(0, 255)
-                val g = ((tensor[0][1][y][x] + 1f) * 127.5f).toInt().coerceIn(0, 255)
-                val b = ((tensor[0][2][y][x] + 1f) * 127.5f).toInt().coerceIn(0, 255)
-                pixels[y * w + x] = Color.rgb(r, g, b)
+                val i = y * w + x
+                val r = ((buffer.get(0 * planeSize + i) + 1f) * 127.5f).toInt().coerceIn(0, 255)
+                val g = ((buffer.get(1 * planeSize + i) + 1f) * 127.5f).toInt().coerceIn(0, 255)
+                val b = ((buffer.get(2 * planeSize + i) + 1f) * 127.5f).toInt().coerceIn(0, 255)
+                pixels[i] = Color.rgb(r, g, b)
             }
         }
         bitmap.setPixels(pixels, 0, w, 0, 0, w, h)
