@@ -102,7 +102,7 @@
             android:background="@color/card"
             android:contentDescription="原图预览" />
 
-        <!-- 参数调节 -->
+        <!-- ★ 参数调节（已补全所有控件） -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -112,11 +112,12 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="16dp">
 
+            <!-- 模糊半径 -->
             <TextView
                 android:id="@+id/tvBlur"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="模糊半径: 30"
+                android:text="模糊半径: 20"
                 android:textSize="14sp"
                 android:textColor="@color/text_primary" />
             <SeekBar
@@ -124,13 +125,14 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:max="60"
-                android:progress="30" />
+                android:progress="20" />
 
+            <!-- 延展比例 -->
             <TextView
                 android:id="@+id/tvExtend"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="延展比例: 25%"
+                android:text="延展比例: 37%"
                 android:textSize="14sp"
                 android:textColor="@color/text_primary"
                 android:layout_marginTop="8dp" />
@@ -138,14 +140,15 @@
                 android:id="@+id/seekExtend"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:max="50"
-                android:progress="25" />
+                android:max="60"
+                android:progress="37" />
 
+            <!-- 羽化宽度 -->
             <TextView
                 android:id="@+id/tvFeather"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="羽化宽度: 120"
+                android:text="羽化宽度: 150"
                 android:textSize="14sp"
                 android:textColor="@color/text_primary"
                 android:layout_marginTop="8dp" />
@@ -154,7 +157,55 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:max="300"
-                android:progress="120" />
+                android:progress="150" />
+
+            <!-- ★ 饱和度 -->
+            <TextView
+                android:id="@+id/tvSaturation"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="饱和度: 1.1x"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary"
+                android:layout_marginTop="8dp" />
+            <SeekBar
+                android:id="@+id/seekSaturation"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="150"
+                android:progress="60" />
+
+            <!-- ★ 亮度 -->
+            <TextView
+                android:id="@+id/tvBrightness"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="亮度: 0.00"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary"
+                android:layout_marginTop="8dp" />
+            <SeekBar
+                android:id="@+id/seekBrightness"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="100"
+                android:progress="50" />
+
+            <!-- ★ 蒙版强度 -->
+            <TextView
+                android:id="@+id/tvOverlay"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="蒙版强度: 15%"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary"
+                android:layout_marginTop="8dp" />
+            <SeekBar
+                android:id="@+id/seekOverlay"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="50"
+                android:progress="15" />
         </LinearLayout>
 
         <!-- 结果预览（PhotoView 可缩放） -->
@@ -219,5 +270,4 @@
             android:layout_height="24dp" />
 
     </LinearLayout>
-
 </ScrollView>
