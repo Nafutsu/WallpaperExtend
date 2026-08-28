@@ -18,94 +18,78 @@ object WallpaperProcessor {
         val blurRadius: Int = 56,
         val extendRatio: Float = 0.32f,
         val featherWidth: Int = 120,
-        val topOnly: Boolean = true,
+        val topOnly: Boolean = true,   // 现在固定 true，保留字段兼容旧调用
         val mode: Mode = Mode.LIGHT
     )
 
-    fun process(
-        src: Bitmap,
-        targetW: Int,
-        targetH: Int,
-        config: Config = Config()
-    ): Bitmap {
-        val safeSrc = ensureOpaque(src)
+    /**
+     * @param src      原始图片
+     * @param targetW  输出宽度（一般 = 屏幕宽）
+     * @param targetH  输出高度（一般 = 屏幕高）
+     */
+    fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
+        // 1. 保证不透明，避免模糊产生彩色拖影
+        val safe = ensureOpaque(src)
 
-        val scaled = scaleToWidth(safeSrc, targetW)
+        // 2. 等比缩放到目标宽度
+        val scaled = scaleToWidth(safe, targetW)
         val srcW = scaled.width
         val srcH = scaled.height
 
-        val topOnly = effectiveTopOnly(config.topOnly)
-        val topH = (targetH * config.extendRatio.coerceIn(0f, 0.6f)).toInt()
-        val bottomH = 0 // 当前强制不向下延展
+        // 3. 只顶部延展
+        val topH = (targetH * config.extendRatio.coerceIn(0f, 0.6f)).roundToInt().coerceAtLeast(0)
         val mainTop = topH
-        val mainBottom = mainTop + srcH
         val outH = targetH
 
         val out = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(backgroundBaseColor(config.mode))
 
-        val drawX = ((targetW - srcW) / 2f)
+        val drawX = ((targetW - srcW) / 2f).coerceAtLeast(0f)
 
-        drawTopExtension(canvas, scaled, targetW, topH, config, srcW, srcH, drawX)
+        // 4. 顶部氛围延展区（严格 clip 在 [0, topH]）
+        drawTopExtension(canvas, scaled, targetW, topH, config)
 
-        // 主体只画在 mainTop 开始位置
+        // 5. 画主体
         canvas.drawBitmap(scaled, drawX, mainTop.toFloat(), null)
 
-        // 顶部融合羽化，严格限制在顶部延展区
-        drawTopFeather(canvas, targetW, topH, config.featherWidth)
+        // 6. 顶部羽化融合（严格 clip 在 [mainTop-feather, mainTop]）
+        drawTopFeather(canvas, targetW, mainTop, config.featherWidth.coerceAtLeast(1))
 
-        if (safeSrc !== src) safeSrc.recycle()
-        if (scaled !== src) scaled.recycle()
+        // 回收临时
+        if (safe !== src) safe.recycle()
+        if (scaled !== src && scaled !== safe) scaled.recycle()
 
         return out
     }
 
-    private fun effectiveTopOnly(requested: Boolean): Boolean = true
+    /* ===================== 内部实现 ===================== */
 
     private fun backgroundBaseColor(mode: Mode): Int =
-        if (mode == Mode.DARK) Color.rgb(18, 20, 24)
-        else Color.rgb(245, 248, 252)
+        if (mode == Mode.DARK) Color.rgb(18, 20, 24) else Color.rgb(245, 248, 252)
 
+    /** 透明像素会导致栈模糊把边缘"透明"混入产生彩边，先垫白底转不透明 */
     private fun ensureOpaque(src: Bitmap): Bitmap {
-        if (!needsOpaqueFix(src)) return src
-
-        val b = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-        val c = Canvas(b)
-        c.drawColor(Color.WHITE)
-        c.drawBitmap(src, 0f, 0f, null)
-        return b
-    }
-
-    private fun needsOpaqueFix(src: Bitmap): Boolean {
-        if (src.config == Bitmap.Config.ALPHA_8) return true
-        // 抽样检查透明边缘/透明像素，避免模糊把透明混出彩边
+        if (src.hasAlpha().not()) return src
+        // 抽样检查是否真的有透明像素
         val step = 8.coerceAtLeast(src.width / 32)
-        val ys = listOf(0, src.height - 1)
-        val xs = listOf(0, src.width - 1)
-        for (y in ys) {
-            for (x in xs) {
-                if (Color.alpha(src.getPixel(x.coerceIn(0, src.width - 1),
-                        y.coerceIn(0, src.height - 1))) < 255) return true
-            }
-        }
         for (y in 0 until src.height step step) {
             for (x in 0 until src.width step step) {
-                if (Color.alpha(src.getPixel(x, y)) < 255) return true
+                if (Color.alpha(src.getPixel(x, y)) < 255) {
+                    val b = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+                    Canvas(b).apply {
+                        drawColor(Color.WHITE)
+                        drawBitmap(src, 0f, 0f, null)
+                    }
+                    return b
+                }
             }
         }
-        return false
+        return src
     }
 
     private fun drawTopExtension(
-        canvas: Canvas,
-        src: Bitmap,
-        w: Int,
-        topH: Int,
-        config: Config,
-        srcW: Int,
-        srcH: Int,
-        drawX: Float
+        canvas: Canvas, src: Bitmap, w: Int, topH: Int, config: Config
     ) {
         if (topH <= 0) return
 
@@ -115,42 +99,41 @@ object WallpaperProcessor {
         val baseColor = sampleAtmosphereColor(src, config.mode)
         canvas.drawColor(baseColor)
 
-        // 用原图顶部区域做模糊氛围，只画到顶部区域
-        val sliceH = (srcH * 0.28f).coerceAtLeast(1).coerceAtMost(srcH)
-        val slice = Bitmap.createBitmap(src, 0, 0, srcW, sliceH)
-        val blur = fastStackBlur(scaleToWidth(slice, w), config.blurRadius.coerceIn(0, 120))
+        // 取原图顶部 28% 做模糊氛围
+        val sliceH = (src.height * 0.28f).roundToInt().coerceAtLeast(1).coerceAtMost(src.height)
+        val slice = Bitmap.createBitmap(src, 0, 0, src.width, sliceH)
+        val blur = stackBlur(scaleToWidth(slice, w), config.blurRadius.coerceIn(0, 120))
         slice.recycle()
 
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-        // 让模糊氛围淡一点，避免压过原图融合
-        paint.alpha = if (config.mode == Mode.DARK) 170 else 215
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+            alpha = if (config.mode == Mode.DARK) 170 else 215
+        }
         canvas.drawBitmap(blur, 0f, 0f, paint)
 
-        // 从上往下轻微渐变，让时钟区更干净
+        // 顶部往下的轻微提亮渐变，让时钟区干净
         val grad = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
-                0f, 0f,
-                0f, topH.toFloat(),
+                0f, 0f, 0f, topH.toFloat(),
                 intArrayOf(
                     if (config.mode == Mode.DARK) Color.argb(90, 0, 0, 0)
                     else Color.argb(70, 255, 255, 255),
                     Color.TRANSPARENT
                 ),
-                null,
-                Shader.TileMode.CLAMP
+                null, Shader.TileMode.CLAMP
             )
         }
         canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), grad)
+        grad.shader = null
 
         blur.recycle()
         canvas.restore()
     }
 
-    private fun drawTopFeather(canvas: Canvas, w: Int, topH: Int, featherWidth: Int) {
-        if (topH <= 0) return
-        val feather = featherWidth.coerceIn(0, topH)
-        val startY = (topH - feather).toFloat()
-        val endY = topH.toFloat()
+    private fun drawTopFeather(canvas: Canvas, w: Int, mainTop: Int, featherWidth: Int) {
+        if (mainTop <= 0) return
+        val feather = featherWidth.coerceIn(0, mainTop)
+        val startY = (mainTop - feather).toFloat()
+        val endY = mainTop.toFloat()
 
         canvas.save()
         canvas.clipRect(0f, startY, w.toFloat(), endY)
@@ -158,14 +141,13 @@ object WallpaperProcessor {
         val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
             shader = LinearGradient(
-                0f, startY,
-                0f, endY,
+                0f, startY, 0f, endY,
                 intArrayOf(Color.TRANSPARENT, Color.BLACK),
-                null,
-                Shader.TileMode.CLAMP
+                null, Shader.TileMode.CLAMP
             )
         }
         canvas.drawRect(0f, startY, w.toFloat(), endY, paint)
+        paint.shader = null
         canvas.restore()
     }
 
@@ -177,22 +159,14 @@ object WallpaperProcessor {
             for (x in 0 until sample.width) {
                 val c = sample.getPixel(x, y)
                 if (Color.alpha(c) < 16) continue
-                r += Color.red(c)
-                g += Color.green(c)
-                b += Color.blue(c)
-                count++
+                r += Color.red(c); g += Color.green(c); b += Color.blue(c); count++
             }
         }
         sample.recycle()
         if (count == 0) {
-            return if (mode == Mode.DARK) Color.rgb(30, 32, 48)
-            else Color.rgb(220, 235, 245)
+            return if (mode == Mode.DARK) Color.rgb(30, 32, 48) else Color.rgb(220, 235, 245)
         }
-
-        r /= count
-        g /= count
-        b /= count
-
+        r /= count; g /= count; b /= count
         return if (mode == Mode.DARK) {
             Color.rgb(
                 (r * 0.25f).roundToInt().coerceIn(0, 80),
@@ -210,21 +184,19 @@ object WallpaperProcessor {
 
     private fun scaleToWidth(src: Bitmap, targetW: Int): Bitmap {
         if (src.width == targetW) return src
-        val targetH = (targetW.toFloat() / src.width * src.height)
-            .roundToInt()
-            .coerceAtLeast(1)
+        val targetH = (targetW.toFloat() / src.width * src.height).roundToInt().coerceAtLeast(1)
         return Bitmap.createScaledBitmap(src, targetW, targetH, true)
     }
 
-    // 简单栈模糊，避免引入额外依赖；半径会钳制，性能可接受
-    private fun fastStackBlur(s: Bitmap, radius: Int): Bitmap {
+    /* ===================== 栈模糊（不依赖 RenderScript） ===================== */
+
+    private fun stackBlur(s: Bitmap, radius: Int): Bitmap {
         if (radius <= 0) return s
+        val r = radius.coerceIn(1, 255)
         val w = s.width
         val h = s.height
         val pix = IntArray(w * h)
         s.getPixels(pix, 0, w, 0, 0, w, h)
-        val r = radius.coerceIn(1, 120)
-
         stackBlur(pix, w, h, r)
         val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         out.setPixels(pix, 0, w, 0, 0, w, h)
@@ -237,147 +209,78 @@ object WallpaperProcessor {
         val hm = h - 1
         val wh = w * h
         val div = radius + radius + 1
+
         val r = IntArray(wh)
         val g = IntArray(wh)
         val b = IntArray(wh)
         val a = IntArray(wh)
-        var x: Int
-        var y: Int
-        var i: Int
-        var p: Int
-        var yp: Int
-        var yi: Int
-        var yw: Int
-        val vMin = IntArray(Math.max(w, h))
-        var divSum = div + 1 shr 1
-        divSum *= divSum
-        val dv = IntArray(256 * divSum)
-        i = 0
-        while (i < dv.size) {
-            dv[i] = i / divSum
-            i++
-        }
 
-        yi = 0
-        yw = 0
-        i = 0
-        while (i < wh) {
-            p = pix[i]
+        for (i in 0 until wh) {
+            val p = pix[i]
             r[i] = Color.red(p)
             g[i] = Color.green(p)
             b[i] = Color.blue(p)
             a[i] = Color.alpha(p)
-            i++
         }
 
-        var yp0 = 0
-        i = 0
-        while (i < h) {
-            var sumR = 0
-            var sumG = 0
-            var sumB = 0
-            var sumA = 0
-            var sumRIn = 0
-            var sumGIn = 0
-            var sumBIn = 0
-            var sumAIn = 0
-            var sumROut = 0
-            var sumGOut = 0
-            var sumBOut = 0
-            var sumAOut = 0
-            var rIn: Int
-            var gIn: Int
-            var bIn: Int
-            var aIn: Int
-            var rOut: Int
-            var gOut: Int
-            var bOut: Int
-            var aOut: Int
-            var m = -radius
-            while (m <= radius) {
-                p = pix[yi + Math.min(wm, Math.max(m, 0))]
-                sumR += Color.red(p)
-                sumG += Color.green(p)
-                sumB += Color.blue(p)
-                sumA += Color.alpha(p)
-                m++
+        var yw = 0
+        val vMin = IntArray(Math.max(w, h))
+
+        // ===== 横向 pass =====
+        var divSum = (div + 1) shr 1
+        divSum *= divSum
+        val dv = IntArray(256 * divSum)
+        for (i in dv.indices) dv[i] = i / divSum
+
+        for (y in 0 until h) {
+            var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
+            for (i in -radius..radius) {
+                val p = pix[yw + (i + w) % w]
+                sumR += Color.red(p); sumG += Color.green(p); sumB += Color.blue(p); sumA += Color.alpha(p)
             }
-            x = 0
-            while (x < w) {
-                r[yi] = dv[sumR]
-                g[yi] = dv[sumG]
-                b[yi] = dv[sumB]
-                a[yi] = dv[sumA]
-                if (yp0 == 0) {
-                    vMin[x] = Math.min(x + radius + 1, wm)
-                }
-                p = pix[yw + vMin[x]]
-                rOut = Color.red(p)
-                gOut = Color.green(p)
-                bOut = Color.blue(p)
-                aOut = Color.alpha(p)
-                p = pix[yw + Math.max(x - radius, 0)]
-                rIn = Color.red(p)
-                gIn = Color.green(p)
-                bIn = Color.blue(p)
-                aIn = Color.alpha(p)
-                sumR += rIn - rOut
-                sumG += gIn - gOut
-                sumB += bIn - bOut
-                sumA += aIn - aOut
-                sumROut += rOut
-                sumGOut += gOut
-                sumBOut += bOut
-                sumAOut += aOut
-                sumRIn += rIn
-                sumGIn += gIn
-                sumBIn += bIn
-                sumAIn += aIn
-                yi++
-                x++
+            for (x in 0 until w) {
+                r[yw + x] = dv[sumR.coerceIn(0, 255 * div)]
+                g[yw + x] = dv[sumG.coerceIn(0, 255 * div)]
+                b[yw + x] = dv[sumB.coerceIn(0, 255 * div)]
+                a[yw + x] = dv[sumA.coerceIn(0, 255 * div)]
+
+                val xi1 = x + radius + 1
+                val xi2 = x - radius
+                val p1 = pix[yw + if (xi1 <= wm) xi1 else xi1 - w]
+                val p2 = pix[yw + if (xi2 >= 0) xi2 else xi2 + w]
+                sumR += Color.red(p1) - Color.red(p2)
+                sumG += Color.green(p1) - Color.green(p2)
+                sumB += Color.blue(p1) - Color.blue(p2)
+                sumA += Color.alpha(p1) - Color.alpha(p2)
             }
             yw += w
-            yp0++
         }
 
-        yi = 0
+        // ===== 纵向 pass =====
         yw = 0
-        i = 0
-        while (i < w) {
-            var sumR = 0
-            var sumG = 0
-            var sumB = 0
-            var sumA = 0
-            var yp1 = -radius * w
-            y = 0
-            while (y <= radius) {
-                yi = Math.max(0, yp1) + i
-                sumR += r[yi]
-                sumG += g[yi]
-                sumB += b[yi]
-                sumA += a[yi]
-                yp1 += w
-                y++
+        for (x in 0 until w) {
+            var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
+            for (i in -radius..radius) {
+                val idx = (i + h) % h
+                val yi = idx * w + x
+                sumR += r[yi]; sumG += g[yi]; sumB += b[yi]; sumA += a[yi]
             }
-            y = 0
-            while (y < h) {
-                pix[yw + i] = Color.argb(dv[sumA], dv[sumR], dv[sumG], dv[sumB])
-                if (x == 0) {
-                    vMin[y] = Math.min(y + radius + 1, hm) * w + i
-                }
-                p = yw + vMin[y]
-                sumR -= r[p]
-                sumG -= g[p]
-                sumB -= b[p]
-                sumA -= a[p]
-                p = yw + Math.max(0, y - radius) * w + i
-                sumR += r[p]
-                sumG += g[p]
-                sumB += b[p]
-                sumA += a[p]
-                y++
+            for (y in 0 until h) {
+                val outIdx = yw + x
+                pix[outIdx] = Color.argb(dv[sumA], dv[sumR], dv[sumG], dv[sumB])
+
+                val yi1 = y + radius + 1
+                val yi2 = y - radius
+                val idx1 = if (yi1 <= hm) yi1 else yi1 - h
+                val idx2 = if (yi2 >= 0) yi2 else yi2 + h
+                val p1 = idx1 * w + x
+                val p2 = idx2 * w + x
+                sumR += r[p1] - r[p2]
+                sumG += g[p1] - g[p2]
+                sumB += b[p1] - b[p2]
+                sumA += a[p1] - a[p2]
             }
-            i++
+            yw += w
         }
     }
 }
