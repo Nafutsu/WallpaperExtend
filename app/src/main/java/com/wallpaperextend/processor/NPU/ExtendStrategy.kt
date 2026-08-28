@@ -1,4 +1,4 @@
-package com.wallpaperextend.processor.ai
+package com.wallpaperextend.processor.NPU
 
 import android.content.Context
 import android.graphics.Bitmap
@@ -19,11 +19,6 @@ interface ExtendStrategy {
 
     /**
      * 执行延展。
-     * @param src      原图
-     * @param targetW  目标宽度（屏幕宽）
-     * @param targetH  目标高度（屏幕高）
-     * @param config   参数
-     * @return 延展后的完整壁纸 Bitmap
      */
     suspend fun extend(
         context: Context,

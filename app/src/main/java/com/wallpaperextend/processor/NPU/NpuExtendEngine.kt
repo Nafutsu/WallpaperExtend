@@ -1,4 +1,4 @@
-package com.wallpaperextend.processor.ai
+package com.wallpaperextend.processor.NPU
 
 import ai.onnxruntime.OnnxTensor
 import ai.onnxruntime.OrtEnvironment
@@ -20,7 +20,6 @@ import java.nio.FloatBuffer
  * 流程：原图 → 构造 image + mask 输入 → ONNX Runtime 推理（NNAPI/GPU/CPU）→ 生成扩展区 → 拼接 → 输出
  *
  * 执行提供者优先级：NNAPI（骁龙/联发科 NPU）> CPU
- * 如需骁龙专属加速，启用 QNN EP（需在 build.gradle 加 qnn 依赖 + 放 .so）
  */
 class NpuExtendEngine(
     private val context: Context
@@ -38,7 +37,6 @@ class NpuExtendEngine(
 
     override fun isAvailable(): Boolean {
         return try {
-            // 检查模型文件是否在 assets 中
             context.assets.open(MODEL_PATH).close()
             true
         } catch (e: Exception) {
@@ -54,11 +52,9 @@ class NpuExtendEngine(
         try {
             env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
-                // 自动选择最优 EP：NNAPI（NPU）> CPU
-                addNnapi(true)
-                // 骁龙 QNN NPU（可选，需启用 qnn 依赖 + 放 .so）
-                // addConfigEntry("session.qnn.use_npu", "1")
-                // addConfigEntry("session.qnn.ep_options", "QNN_ENABLE_HTP=true")
+                // ★ 修复1：addNnapi 接收 EnumSet<NNAPIFlags>，空集合 = 默认配置
+                @Suppress("UNCHECKED_CAST")
+                addNnapi(java.util.EnumSet.noneOf(ai.onnxruntime.OrtSession.SessionOptions.NNAPIFlags::class.java))
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
             val modelBytes = context.assets.open(MODEL_PATH).readBytes()
@@ -77,20 +73,15 @@ class NpuExtendEngine(
         targetH: Int,
         config: WallpaperConfig
     ): Bitmap = withContext(Dispatchers.Default) {
-
         if (!isInitialized) loadModels()
         val ortSession = session ?: throw IllegalStateException("NPU model not loaded")
 
-        // 1. 计算延展高度
         val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt()
 
-        // 2. 原图缩放（适配目标宽度）
         val scaledH = (targetW.toFloat() / src.width * src.height).toInt().coerceAtLeast(1)
         val scaledSrc = Bitmap.createScaledBitmap(src, targetW, scaledH, true)
 
-        // 3. 构造 512x512 模型输入
-        //    image: 原图放在底部，顶部 extendH 区域留黑（待生成）
-        //    mask:  顶部 extendH 区域 = 1（待生成），其余 = 0
+        // 3. 构造 512x512 模型输入（原图放底部，顶部留黑待生成）
         val inputBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
         Canvas(inputBitmap).apply {
             drawColor(Color.BLACK)
@@ -116,23 +107,22 @@ class NpuExtendEngine(
         // 6. ★ NPU 推理
         val inputs = mapOf("image" to imageTensor, "mask" to maskTensor)
         val outputs = ortSession.run(inputs)
-        val resultTensor = outputs["output"] ?: outputs[0]
+        // ★ 修复2：用 outputs[0] 取第一个输出，再 .get().value
+        val resultTensor = outputs[0]
         @Suppress("UNCHECKED_CAST")
-        val resultArray = resultTensor.value as Array<Array<Array<FloatArray>>>
+        val resultArray = resultTensor.get().value as Array<Array<Array<FloatArray>>>
 
-        // 7. Tensor → Bitmap（模型生成的完整 512x512）
+        // 7. Tensor → Bitmap
         val generated512 = tensorToBitmap(resultArray, INPUT_SIZE, INPUT_SIZE)
 
         // 8. 拼接：生成的顶部延展区 + 原图
         val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         Canvas(finalBitmap).apply {
-            // 顶部：裁剪生成图的对应区域，缩放到 extendH
             val topH = (extendH * INPUT_SIZE / targetH).coerceAtLeast(1)
             val topRegion = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, topH)
             val topScaled = Bitmap.createScaledBitmap(topRegion, targetW, extendH, true)
             drawBitmap(topScaled, 0f, 0f, null)
 
-            // 底部：原图（从 extendH 开始）
             val bottomH = targetH - extendH
             if (bottomH > 0) {
                 val bottomScaled = Bitmap.createScaledBitmap(scaledSrc, targetW, bottomH, true)
@@ -143,14 +133,11 @@ class NpuExtendEngine(
             topRegion.recycle()
         }
 
-        // 清理
+        // ★ 修复3：OnnxTensor / OrtSession.Result 不需要手动 close()
         inputBitmap.recycle()
         maskBitmap.recycle()
         generated512.recycle()
         scaledSrc.recycle()
-        imageTensor.close()
-        maskTensor.close()
-        outputs.forEach { it.close() }
 
         finalBitmap
     }
