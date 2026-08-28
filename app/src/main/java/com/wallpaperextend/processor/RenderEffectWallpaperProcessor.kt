@@ -1,5 +1,7 @@
 package com.wallpaperextend.processor
 
+import android.graphics.HardwareRenderer
+import android.graphics.RenderNode
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Color
