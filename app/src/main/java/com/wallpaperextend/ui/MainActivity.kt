@@ -3,7 +3,6 @@ package com.wallpaperextend.ui
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
-import android.os.Build
 import android.os.Bundle
 import android.view.ScaleGestureDetector
 import android.view.View
@@ -25,20 +24,24 @@ import kotlinx.coroutines.withContext
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
     // ====== 参数 ======
-    private var blurRadius = 32
-    private var extendRatio = 0.37f      // 最大延展高度占比上限；实际延展量 = 屏幕高 - 原图高
-    private var featherWidth = 100
+    private var blurRadius = 20
+    private var extendRatio = 0.37f
+    private var featherWidth = 150
     @Suppress("unused")
-    private var topOnly = true           // iOS 风格恒为 true，保留字段
-    private var targetHeight = 0        // 0 = 自动取屏幕高度（推荐，防白边 + 底部对齐准确）
+    private var topOnly = true
+    private var targetHeight = 0
 
-    // 双指缩放：scale 越大，原图缩得越小，顶部延展区越高（模拟 iOS 捏合）
-    private var userScale = 1.0f        // 1.0 = 铺满宽度；>1 表示用户缩小
+    // ★ 新增：视觉微调参数
+    private var saturationBoost = 1.1f
+    private var brightnessOffset = 0f
+    private var overlayStrength = 0.15f
+
+    // 双指缩放
+    private var userScale = 1.0f
     private val minScale = 1.0f
     private val maxScale = 1.6f
 
@@ -61,19 +64,15 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 双指缩放检测（作用在结果预览图上）
     private lateinit var scaleDetector: ScaleGestureDetector
     private val onScaleListener = object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
         override fun onScale(detector: ScaleGestureDetector): Boolean {
             val newScale = (userScale * detector.scaleFactor).coerceIn(minScale, maxScale)
             if (kotlin.math.abs(newScale - userScale) > 0.01f) {
                 userScale = newScale
-                // 把缩放量映射到 extendRatio，让延展高度随缩放变化
-                // scale 1.0 -> ratio ~0；scale 1.6 -> ratio ~0.37
                 extendRatio = ((userScale - minScale) / (maxScale - minScale) * 0.37f)
                     .coerceIn(0f, 0.6f)
                 binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
-                // 滑块与手势双向同步
                 binding.seekExtend.progress = (extendRatio * 100).toInt()
                 reprocess()
             }
@@ -87,7 +86,6 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         scaleDetector = ScaleGestureDetector(this, onScaleListener)
-        // 把缩放手势挂到预览 ImageView 上（需布局里 imgResult 允许缩放）
         binding.imgResult.setOnTouchListener { _, event ->
             scaleDetector.onTouchEvent(event)
             true
@@ -105,6 +103,7 @@ class MainActivity : AppCompatActivity() {
             }
             pickImage.launch(intent)
         }
+
         binding.btnSave.setOnClickListener {
             if (processedBitmap == null) {
                 Toast.makeText(this, "请先选择并生成壁纸", Toast.LENGTH_SHORT).show()
@@ -113,7 +112,7 @@ class MainActivity : AppCompatActivity() {
             checkPermissionAndSave()
         }
 
-        // topOnly 开关：iOS 风格固定仅顶部，禁用即可
+        // topOnly 开关：iOS 风格固定仅顶部
         binding.cbTopOnly.isEnabled = false
         binding.cbTopOnly.isChecked = true
 
@@ -124,6 +123,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
+        // ---- 模糊半径 ----
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 blurRadius = progress.coerceAtLeast(1)
@@ -133,17 +133,19 @@ class MainActivity : AppCompatActivity() {
         })
         binding.seekBlur.progress = blurRadius
 
+        // ---- 延展比例 ----
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                // 手动拖动滑块时，同步更新 userScale，保持双向一致
                 extendRatio = (progress / 100f).coerceIn(0f, 0.6f)
-                userScale = (extendRatio / 0.37f).coerceIn(0f, 1f) * (maxScale - minScale) + minScale
+                userScale =
+                    (extendRatio / 0.37f).coerceIn(0f, 1f) * (maxScale - minScale) + minScale
                 binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
                 if (fromUser) reprocess()
             }
         })
         binding.seekExtend.progress = (extendRatio * 100).toInt()
 
+        // ---- 羽化宽度 ----
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 featherWidth = progress.coerceAtLeast(8)
@@ -152,11 +154,40 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekFeather.progress = featherWidth
+
+        // ---- ★ 饱和度 ----
+        binding.seekSaturation.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                saturationBoost = 0.5f + progress / 100f
+                binding.tvSaturation.text = "饱和度: ${"%.1f".format(saturationBoost)}x"
+                if (fromUser) reprocess()
+            }
+        })
+        binding.seekSaturation.progress = 60 // 默认 1.1x
+
+        // ---- ★ 亮度 ----
+        binding.seekBrightness.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                brightnessOffset = (progress - 50) / 250f
+                binding.tvBrightness.text = "亮度: ${"%.2f".format(brightnessOffset)}"
+                if (fromUser) reprocess()
+            }
+        })
+        binding.seekBrightness.progress = 50 // 默认 0
+
+        // ---- ★ 蒙版强度 ----
+        binding.seekOverlay.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                overlayStrength = progress / 100f
+                binding.tvOverlay.text = "蒙版强度: ${(overlayStrength * 100).toInt()}%"
+                if (fromUser) reprocess()
+            }
+        })
+        binding.seekOverlay.progress = 15 // 默认 15%
     }
 
     private fun updateTargetHeight() {
         val value = binding.etTargetHeight.text.toString().toIntOrNull()
-        // 0 或留空 = 自动取屏幕高度（推荐：底部对齐 + 防白边逻辑都依赖此值准确）
         targetHeight = if (value != null && value > 0) value else 0
     }
 
@@ -198,21 +229,23 @@ class MainActivity : AppCompatActivity() {
     private suspend fun processImage() {
         val src = originalBitmap ?: return
         binding.progress.visibility = View.VISIBLE
-        val result = withContext(Dispatchers.Default) {
+        val result = withContext(Dispatchers.IO) {
             val dm = resources.displayMetrics
             val screenW = dm.widthPixels
-            // targetHeight = 0 时自动取屏幕**精确**高度（含状态栏/导航栏外的真实像素），
-            // 用 ceil 避免取整导致底部 1px 露底 → 白边 bug
             val refH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels
             WallpaperProcessor.process(
+                context = this@MainActivity,
                 src = src,
                 targetW = screenW,
                 targetH = refH,
                 config = WallpaperProcessor.Config(
-                    blurRadius = blurRadius,
+                    blurRadius = blurRadius.toFloat(),
                     extendRatio = extendRatio,
                     featherWidth = featherWidth,
-                    topOnly = true // 固定仅顶部延展，对齐 iOS
+                    topOnly = true,
+                    saturationBoost = saturationBoost,
+                    brightnessOffset = brightnessOffset,
+                    overlayStrength = overlayStrength
                 )
             )
         }
@@ -224,7 +257,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun checkPermissionAndSave() {
-        val needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
+        val needsPermission = android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q
         if (!needsPermission) {
             saveCurrent()
         } else {
@@ -241,7 +274,8 @@ class MainActivity : AppCompatActivity() {
             val ok = try {
                 withContext(Dispatchers.IO) {
                     ImageSaver.saveToGallery(
-                        this@MainActivity, bmp,
+                        this@MainActivity,
+                        bmp,
                         "WallpaperExtend_${System.currentTimeMillis()}.png"
                     )
                 }
@@ -254,9 +288,11 @@ class MainActivity : AppCompatActivity() {
                 binding.progress.visibility = View.GONE
                 binding.btnSave.isEnabled = true
                 if (ok) {
-                    Toast.makeText(this@MainActivity, "保存成功，已加入相册", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "保存成功，已加入相册", Toast.LENGTH_LONG)
+                        .show()
                 } else {
-                    Toast.makeText(this@MainActivity, "保存失败：$errorMsg", Toast.LENGTH_LONG).show()
+                    Toast.makeText(this@MainActivity, "保存失败：$errorMsg", Toast.LENGTH_LONG)
+                        .show()
                 }
             }
         }
