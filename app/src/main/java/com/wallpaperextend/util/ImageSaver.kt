@@ -11,22 +11,18 @@ import java.io.FileOutputStream
 
 object ImageSaver {
 
-    /**
-     * 保存 Bitmap 到相册 Pictures/WallpaperExtend。
-     * - Android 10+：MediaStore + IS_PENDING 原子可见
-     * - Android 9-：直接写文件 + 媒体库扫描
-     *
-     * @return true 成功，false 失败（异常已内部捕获并记录）
-     */
     fun saveToGallery(context: Context, bitmap: Bitmap, filename: String): Boolean {
-        if (bitmap.isRecycled || bitmap.width == 0 || bitmap.height == 0) return false
+        if (bitmap.isRecycled || bitmap.width == 0 || bitmap.height == 0) {
+            return false
+        }
 
         return try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val result = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 saveWithMediaStore(context, bitmap, filename)
             } else {
                 saveLegacy(context, bitmap, filename)
             }
+            result
         } catch (e: Exception) {
             e.printStackTrace()
             false
@@ -48,47 +44,53 @@ object ImageSaver {
             ?: return false
 
         try {
-            resolver.openOutputStream(uri)?.use { out ->
-                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                    throw RuntimeException("compress returned false")
+            val out = resolver.openOutputStream(uri)
+            if (out == null) {
+                resolver.delete(uri, null, null)
+                return false
+            }
+            out.use {
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, it)) {
+                    resolver.delete(uri, null, null)
+                    return false
                 }
-            } ?: throw RuntimeException("openOutputStream returned null")
-
-            // 提交：关闭 pending，对外可见
+            }
             val finish = ContentValues().apply {
                 put(MediaStore.Images.Media.IS_PENDING, 0)
             }
             resolver.update(uri, finish, null, null)
-            true
+            return true
         } catch (e: Exception) {
-            // 失败清理占位 URI
             try { resolver.delete(uri, null, null) } catch (_: Exception) {}
-            throw e
+            return false
         }
     }
 
     @Suppress("DEPRECATION")
     private fun saveLegacy(context: Context, bitmap: Bitmap, filename: String): Boolean {
-        val dir = File(
-            Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
-            "WallpaperExtend"
-        )
-        if (!dir.exists() && !dir.mkdirs()) return false
+        return try {
+            val dir = File(
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_PICTURES),
+                "WallpaperExtend"
+            )
+            if (!dir.exists() && !dir.mkdirs()) return false
 
-        val file = File(dir, filename)
-        FileOutputStream(file).use { out ->
-            if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
-                throw RuntimeException("compress returned false")
+            val file = File(dir, filename)
+            FileOutputStream(file).use { out ->
+                if (!bitmap.compress(Bitmap.CompressFormat.PNG, 100, out)) {
+                    return false
+                }
             }
+            MediaStore.Images.Media.insertImage(
+                context.contentResolver,
+                file.absolutePath,
+                file.name,
+                null
+            )
+            true
+        } catch (e: Exception) {
+            e.printStackTrace()
+            false
         }
-
-        // 通知媒体库扫描（insertImage 内部会处理）
-        MediaStore.Images.Media.insertImage(
-            context.contentResolver,
-            file.absolutePath,
-            file.name,
-            null
-        )
-        return true
     }
 }
