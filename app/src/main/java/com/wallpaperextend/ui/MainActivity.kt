@@ -76,7 +76,7 @@ class MainActivity : AppCompatActivity() {
         // 模糊半径
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                blurRadius = progress.toFloat().coerceAtLeast(1)
+                blurRadius = progress.toFloat().coerceAtLeast(1f)
                 binding.tvBlur.text = "模糊半径: $progress"
                 if (fromUser) reprocess()
             }
