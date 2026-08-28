@@ -1,301 +1,316 @@
-package com.wallpaperextend.processor
+package com.wallpaperextend.ui
 
+import android.app.Activity
+import android.content.Intent
 import android.graphics.Bitmap
-import android.graphics.Canvas
-import android.graphics.Color
-import android.graphics.LinearGradient
-import android.graphics.Paint
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
-import android.graphics.Shader
-import kotlin.math.max
-import kotlin.math.min
+import android.os.Build
+import android.os.Bundle
+import android.view.View
+import android.widget.SeekBar
+import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
+import com.wallpaperextend.databinding.ActivityMainBinding
+import com.wallpaperextend.processor.WallpaperExtend
+import com.wallpaperextend.util.ImageLoader
+import com.wallpaperextend.util.ImageSaver
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
-object WallpaperExtend {
+class MainActivity : AppCompatActivity() {
 
-    /**
-     * 只顶部延展
-     * 对应 MainActivity 调用：
-     * WallpaperExtend.extendTop(src, extendH, featherH, blurRadius)
-     */
-    fun extendTop(src: Bitmap, extendH: Int, featherH: Int, blurRadius: Int): Bitmap {
-        val safe = ensureOpaque(src)
-        val srcW = safe.width
-        val srcH = safe.height
+    private lateinit var binding: ActivityMainBinding
+    private var originalBitmap: Bitmap? = null
+    private var processedBitmap: Bitmap? = null
 
-        val topH = extendH.coerceAtLeast(0)
-        val outH = topH + srcH
-        val out = Bitmap.createBitmap(srcW, outH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
-        canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+    // 可调参数
+    private var blurRadius = 30
+    private var extendRatio = 0.25f
+    private var featherWidth = 120
+    private var topOnly = true
+    private var targetHeight = 0
 
-        if (topH > 0) {
-            drawTopExtension(canvas, safe, srcW, topH, blurRadius, featherH)
+    // 原图真实尺寸（加载后填充）
+    private var srcWidth = 0
+    private var srcHeight = 0
+
+    // 选图回调
+    private val pickImage = registerForActivityResult(
+        ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK && result.data != null) {
+            val uri = result.data!!.data ?: return@registerForActivityResult
+            loadAndProcess(uri)
         }
-
-        // 原图
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        canvas.drawBitmap(safe, 0f, topH.toFloat(), paint)
-
-        if (safe !== src) safe.recycle()
-        return out
     }
 
-    /**
-     * 只底部延展
-     * 对应 MainActivity 调用：
-     * WallpaperExtend.extendBottom(src, extendH, featherH, blurRadius)
-     */
-    fun extendBottom(src: Bitmap, extendH: Int, featherH: Int, blurRadius: Int): Bitmap {
-        val safe = ensureOpaque(src)
-        val srcW = safe.width
-        val srcH = safe.height
-
-        val bottomH = extendH.coerceAtLeast(0)
-        val outH = srcH + bottomH
-        val out = Bitmap.createBitmap(srcW, outH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
-        canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
-
-        // 原图
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        canvas.drawBitmap(safe, 0f, 0f, paint)
-
-        if (bottomH > 0) {
-            drawBottomExtension(canvas, safe, srcW, srcH, bottomH, blurRadius, featherH)
-        }
-
-        if (safe !== src) safe.recycle()
-        return out
-    }
-
-    /* ================= 顶部延展 ================= */
-
-    private fun drawTopExtension(
-        canvas: Canvas, src: Bitmap, w: Int, topH: Int, blurRadius: Int, feather: Int
-    ) {
-        val stripH = max(8, src.height / 40)
-        val topStrip = Bitmap.createBitmap(src, 0, 0, src.width, min(stripH, src.height))
-
-        val stretched = Bitmap.createScaledBitmap(topStrip, w, topH, true)
-        topStrip.recycle()
-
-        val blurred = stackBlur(stretched, blurRadius.coerceIn(1, 80))
-        stretched.recycle()
-
-        // 画模糊底色
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        canvas.drawBitmap(blurred, 0f, 0f, paint)
-
-        // 轻色调统一（不用 SRC_ATOP，避免灰黑脏边）
-        val topAvg = sampleTopColor(src, 0.2f)
-        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        tonePaint.color = Color.argb(28,
-            Color.red(topAvg), Color.green(topAvg), Color.blue(topAvg))
-        canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), tonePaint)
-
-        // 轻微提亮
-        tonePaint.color = Color.argb(15, 255, 255, 255)
-        canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), tonePaint)
-
-        // 接缝渐变：延展区底部淡出，让原图透上来
-        val f = feather.coerceIn(8, topH)
-        val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        fadePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-        fadePaint.shader = LinearGradient(
-            0f, (topH - f).toFloat(), 0f, topH.toFloat(),
-            intArrayOf(Color.BLACK, Color.TRANSPARENT),
-            floatArrayOf(0f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, (topH - f).toFloat(), w.toFloat(), topH.toFloat(), fadePaint)
-
-        blurred.recycle()
-    }
-
-    /* ================= 底部延展 ================= */
-
-    private fun drawBottomExtension(
-        canvas: Canvas, src: Bitmap, w: Int, srcH: Int, bottomH: Int, blurRadius: Int, feather: Int
-    ) {
-        val stripH = max(8, src.height / 40)
-        val bottomStrip = Bitmap.createBitmap(src, 0, src.height - stripH, src.width, stripH)
-
-        val stretched = Bitmap.createScaledBitmap(bottomStrip, w, bottomH, true)
-        bottomStrip.recycle()
-
-        val blurred = stackBlur(stretched, blurRadius.coerceIn(1, 80))
-        stretched.recycle()
-
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        canvas.drawBitmap(blurred, 0f, srcH.toFloat(), paint)
-
-        val bottomAvg = sampleBottomColor(src, 0.2f)
-        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        tonePaint.color = Color.argb(28,
-            Color.red(bottomAvg), Color.green(bottomAvg), Color.blue(bottomAvg))
-        canvas.drawRect(0f, srcH.toFloat(), w.toFloat(), (srcH + bottomH).toFloat(), tonePaint)
-
-        tonePaint.color = Color.argb(15, 255, 255, 255)
-        canvas.drawRect(0f, srcH.toFloat(), w.toFloat(), (srcH + bottomH).toFloat(), tonePaint)
-
-        // 接缝渐变：底部延展顶部淡出
-        val f = feather.coerceIn(8, bottomH)
-        val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG)
-        fadePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-        fadePaint.shader = LinearGradient(
-            0f, srcH.toFloat(), 0f, (srcH + f).toFloat(),
-            intArrayOf(Color.BLACK, Color.TRANSPARENT),
-            floatArrayOf(0f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, srcH.toFloat(), w.toFloat(), (srcH + f).toFloat(), fadePaint)
-
-        blurred.recycle()
-    }
-
-    /* ================= 取色 ================= */
-
-    private fun sampleTopColor(src: Bitmap, ratio: Float): Int {
-        val sample = Bitmap.createScaledBitmap(src, 32, 32, true)
-        var r = 0; var g = 0; var b = 0; var count = 0
-        val endY = max(1, (sample.height * ratio).toInt())
-        for (y in 0 until endY) {
-            for (x in 0 until sample.width) {
-                val c = sample.getPixel(x, y)
-                if (Color.alpha(c) < 128) continue
-                r += Color.red(c); g += Color.green(c); b += Color.blue(c); count++
-            }
-        }
-        sample.recycle()
-        if (count == 0) return Color.WHITE
-        return Color.rgb(r / count, g / count, b / count)
-    }
-
-    private fun sampleBottomColor(src: Bitmap, ratio: Float): Int {
-        val sample = Bitmap.createScaledBitmap(src, 32, 32, true)
-        var r = 0; var g = 0; var b = 0; var count = 0
-        val startY = max(0, sample.height - (sample.height * ratio).toInt())
-        for (y in startY until sample.height) {
-            for (x in 0 until sample.width) {
-                val c = sample.getPixel(x, y)
-                if (Color.alpha(c) < 128) continue
-                r += Color.red(c); g += Color.green(c); b += Color.blue(c); count++
-            }
-        }
-        sample.recycle()
-        if (count == 0) return Color.WHITE
-        return Color.rgb(r / count, g / count, b / count)
-    }
-
-    /* ================= 工具 ================= */
-
-    private fun ensureOpaque(src: Bitmap): Bitmap {
-        if (!src.hasAlpha()) return src
-        val b = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-        Canvas(b).apply {
-            drawColor(Color.WHITE)
-            drawBitmap(src, 0f, 0f, null)
-        }
-        return b
-    }
-
-    /* ================= 栈模糊 ================= */
-
-    private fun stackBlur(s: Bitmap, radius: Int): Bitmap {
-        val r = radius.coerceIn(1, 255)
-        val w = s.width
-        val h = s.height
-        if (w <= 0 || h <= 0) return s
-
-        val MAX_DIM = 1024
-        val work = if (max(w, h) > MAX_DIM) {
-            val scale = MAX_DIM.toFloat() / max(w, h)
-            Bitmap.createScaledBitmap(s,
-                max(1, (w * scale).toInt()), max(1, (h * scale).toInt()), true)
+    // 存储权限回调
+    private val requestPermission = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            saveCurrent()
         } else {
-            s
+            Toast.makeText(this, "需要存储权限才能保存图片", Toast.LENGTH_SHORT).show()
         }
-        val ww = work.width
-        val hh = work.height
-        val size = ww * hh
+    }
 
-        val pixels = IntArray(size)
-        work.getPixels(pixels, 0, ww, 0, 0, ww, hh)
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        binding = ActivityMainBinding.inflate(layoutInflater)
+        setContentView(binding.root)
+        setupUI()
+        handleSharedIntent()
+    }
 
-        val maxRad = (min(ww, hh) - 1) / 2
-        val rad = min(r, maxRad).coerceAtLeast(1)
+    private fun setupUI() {
+        // 选图按钮
+        binding.btnPick.setOnClickListener {
+            val intent = Intent(Intent.ACTION_PICK).apply {
+                type = "image/*"
+                action = Intent.ACTION_GET_CONTENT
+            }
+            pickImage.launch(intent)
+        }
 
-        try {
-            stackBlurH(pixels, ww, hh, rad)
-            stackBlurV(pixels, ww, hh, rad)
+        // 下载/保存按钮
+        binding.btnSave.setOnClickListener {
+            if (processedBitmap == null) {
+                Toast.makeText(this, "请先选择并生成壁纸", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            checkPermissionAndSave()
+        }
+
+        // 仅顶部延展开关
+        binding.cbTopOnly.setOnCheckedChangeListener { _, checked ->
+            topOnly = checked
+            reprocess()
+        }
+
+        // 输出高度输入
+        binding.etTargetHeight.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                updateTargetHeight()
+                reprocess()
+            }
+        }
+
+        // 参数调节：模糊半径
+        binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                blurRadius = progress.coerceAtLeast(1)
+                binding.tvBlur.text = "模糊半径: $blurRadius"
+                if (fromUser) reprocess()
+            }
+        })
+        binding.seekBlur.progress = blurRadius
+
+        // 延展比例
+        binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                extendRatio = progress / 100f
+                binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
+                if (fromUser) reprocess()
+            }
+        })
+        binding.seekExtend.progress = (extendRatio * 100).toInt()
+
+        // 羽化宽度
+        binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                featherWidth = progress
+                binding.tvFeather.text = "羽化宽度: $featherWidth"
+                if (fromUser) reprocess()
+            }
+        })
+        binding.seekFeather.progress = featherWidth
+    }
+
+    private fun updateTargetHeight() {
+        val value = binding.etTargetHeight.text.toString().toIntOrNull()
+        targetHeight = if (value != null && value > 0) value else 0
+    }
+
+    /** 处理来自"分享到本 App"的图片 */
+    private fun handleSharedIntent() {
+        if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) {
+            @Suppress("DEPRECATION")
+            val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM) as? android.net.Uri
+            uri?.let { loadAndProcess(it) }
+        }
+    }
+
+    private fun loadAndProcess(uri: android.net.Uri) {
+        binding.progress.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            val bmp = withContext(Dispatchers.IO) {
+                ImageLoader.loadFromUri(this@MainActivity, uri)
+            }
+            // 更新原图尺寸显示
+            srcWidth = bmp.width
+            srcHeight = bmp.height
+            binding.tvSize.text = "原图尺寸: ${srcWidth} × ${srcHeight}"
+            if (binding.etTargetHeight.text.isNullOrBlank()) {
+                binding.etTargetHeight.hint = "默认 ${srcHeight}（=原高+延展）"
+            }
+            // 回收旧原图（新图替换）
+            originalBitmap?.recycleSafe()
+            originalBitmap = bmp
+            // 原图预览用缩放副本，避免 UI 持超大 Bitmap
+            binding.imgOriginal.setImageBitmap(bmp)
+            binding.btnSave.isEnabled = false
+            processImage()
+        }
+    }
+
+    /** 参数变化后重新处理（防抖） */
+    private var reprocessJob: Job? = null
+    private fun reprocess() {
+        if (originalBitmap == null) return
+        reprocessJob?.cancel()
+        reprocessJob = lifecycleScope.launch {
+            delay(150)
+            processImage()
+        }
+    }
+
+    private suspend fun processImage() {
+        val src = originalBitmap
+        if (src == null) {
+            Toast.makeText(this, "图片为空", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (src.isRecycled || src.width <= 0 || src.height <= 0) {
+            Toast.makeText(this, "图片不可用", Toast.LENGTH_SHORT).show()
+            return
+        }
+        binding.progress.visibility = View.VISIBLE
+        val result = try {
+            withContext(Dispatchers.Default) {
+                ensureActive()
+
+                val screenW = resources.displayMetrics.widthPixels
+                val screenH = resources.displayMetrics.heightPixels
+                val refH = if (targetHeight > 0) targetHeight else screenH
+
+                // 限制处理宽度，防止 OOM
+                val maxProcessW = screenW * 2
+                val working = if (src.width > maxProcessW) {
+                    val scale = maxProcessW.toFloat() / src.width
+                    val newW = maxProcessW
+                    val newH = (src.height * scale).toInt().coerceAtLeast(1)
+                    Bitmap.createScaledBitmap(src, newW, newH, true)
+                } else {
+                    src
+                }
+
+                val extendH = (refH * extendRatio).toInt()
+
+                val output = if (topOnly) {
+                    WallpaperExtend.extendTop(
+                        src = working,
+                        extendH = extendH,
+                        featherH = featherWidth,
+                        blurRadius = blurRadius.coerceAtMost(6)
+                    )
+                } else {
+                    WallpaperExtend.extendBottom(
+                        src = working,
+                        extendH = extendH,
+                        featherH = featherWidth,
+                        blurRadius = blurRadius.coerceAtMost(6)
+                    )
+                }
+
+                if (working != src) {
+                    working.recycle()
+                }
+                output
+            }
         } catch (e: Exception) {
             e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
+                binding.progress.visibility = View.GONE
+            }
+            return
         }
 
-        val out = Bitmap.createBitmap(ww, hh, Bitmap.Config.ARGB_8888)
-        out.setPixels(pixels, 0, ww, 0, 0, ww, hh)
-
-        if (work !== s) work.recycle()
-        return out
+        binding.imgResult.setImageBitmap(result)
+        processedBitmap = result
+        binding.btnSave.isEnabled = true
+        binding.progress.visibility = View.GONE
     }
 
-    private fun stackBlurH(pixels: IntArray, w: Int, h: Int, radius: Int) {
-        val div = (2 * radius + 1).coerceAtLeast(1)
-        val dv = IntArray(256 * div)
-        for (i in 0 until 256 * div) dv[i] = i / div
-
-        for (y in 0 until h) {
-            var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
-            for (i in -radius..radius) {
-                val xi = (i + w) % w
-                val p = pixels[y * w + xi]
-                sumR += Color.red(p); sumG += Color.green(p); sumB += Color.blue(p); sumA += Color.alpha(p)
-            }
-            for (x in 0 until w) {
-                pixels[y * w + x] = Color.argb(
-                    dv[sumA.coerceIn(0, 255 * div)],
-                    dv[sumR.coerceIn(0, 255 * div)],
-                    dv[sumG.coerceIn(0, 255 * div)],
-                    dv[sumB.coerceIn(0, 255 * div)]
-                )
-                val xiOut = (x - radius + w) % w
-                val xiIn = (x + radius + 1 + w) % w
-                val pOut = pixels[y * w + xiOut]
-                val pIn = pixels[y * w + xiIn]
-                sumR += Color.red(pIn) - Color.red(pOut)
-                sumG += Color.green(pIn) - Color.green(pOut)
-                sumB += Color.blue(pIn) - Color.blue(pOut)
-                sumA += Color.alpha(pIn) - Color.alpha(pOut)
-            }
+    private fun checkPermissionAndSave() {
+        // Android 13+ 不需要 WRITE_EXTERNAL_STORAGE；Android 12- 也不需要（用 MediaStore）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            saveCurrent()
+        } else {
+            requestPermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
 
-    private fun stackBlurV(pixels: IntArray, w: Int, h: Int, radius: Int) {
-        val div = (2 * radius + 1).coerceAtLeast(1)
-        val dv = IntArray(256 * div)
-        for (i in 0 until 256 * div) dv[i] = i / div
-
-        for (x in 0 until w) {
-            var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
-            for (i in -radius..radius) {
-                val yi = ((i + h) % h) * w + x
-                sumR += Color.red(pixels[yi]); sumG += Color.green(pixels[yi]); sumB += Color.blue(pixels[yi]); sumA += Color.alpha(pixels[yi])
+    private fun saveCurrent() {
+        val bmp = processedBitmap ?: return
+        // 禁用按钮防止重复点击
+        binding.btnSave.isEnabled = false
+        binding.progress.visibility = View.VISIBLE
+        lifecycleScope.launch {
+            var errorMsg: String? = null
+            val ok = try {
+                withContext(Dispatchers.IO) {
+                    ImageSaver.saveToGallery(
+                        this@MainActivity, bmp,
+                        "WallpaperExtend_${System.currentTimeMillis()}.png"
+                    )
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                errorMsg = e.message
+                false
             }
-            for (y in 0 until h) {
-                pixels[y * w + x] = Color.argb(
-                    dv[sumA.coerceIn(0, 255 * div)],
-                    dv[sumR.coerceIn(0, 255 * div)],
-                    dv[sumG.coerceIn(0, 255 * div)],
-                    dv[sumB.coerceIn(0, 255 * div)]
-                )
-                val yiOut = ((y - radius + h) % h) * w + x
-                val yiIn = ((y + radius + 1 + h) % h) * w + x
-                sumR += Color.red(pixels[yiIn]) - Color.red(pixels[yiOut])
-                sumG += Color.green(pixels[yiIn]) - Color.green(pixels[yiOut])
-                sumB += Color.blue(pixels[yiIn]) - Color.blue(pixels[yiOut])
-                sumA += Color.alpha(pixels[yiIn]) - Color.alpha(pixels[yiOut])
+            withContext(Dispatchers.Main) {
+                binding.progress.visibility = View.GONE
+                binding.btnSave.isEnabled = true
+                if (ok) {
+                    Toast.makeText(this@MainActivity, "保存成功，已加入相册", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "保存失败：$errorMsg",
+                        Toast.LENGTH_LONG
+                    ).show()
+                }
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        originalBitmap?.recycleSafe()
+        originalBitmap = null
+        processedBitmap?.recycleSafe()
+        processedBitmap = null
+    }
+
+    private fun Bitmap?.recycleSafe() {
+        if (this != null && !isRecycled) {
+            try {
+                recycle()
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    // 简单 SeekBar 监听基类
+    abstract class SimpleSeekBar : SeekBar.OnSeekBarChangeListener {
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
     }
 }
