@@ -1,46 +1,57 @@
 package com.wallpaperextend.processor
 
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.LinearGradient
-import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Shader
+import jp.co.cyberagent.android.gpuimage.GPUImage
+import jp.co.cyberagent.android.gpuimage.filter.GPUImageGaussianBlurFilter
 import kotlin.math.ceil
-import kotlin.math.max
 import kotlin.math.min
 
 object WallpaperProcessor {
+
     enum class Mode { LIGHT, DARK }
 
     data class Config(
-        val blurRadius: Int = 32,
+        val blurRadius: Float = 20f,
         val extendRatio: Float = 0.37f,
         val featherWidth: Int = 150,
         val topOnly: Boolean = true,
-        val mode: Mode = Mode.LIGHT
+        val mode: Mode = Mode.LIGHT,
+        val saturationBoost: Float = 1.1f,
+        val brightnessOffset: Float = 0f,
+        val overlayStrength: Float = 0.15f
     )
 
-    fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
+    fun process(
+        context: Context,
+        src: Bitmap,
+        targetW: Int,
+        targetH: Int,
+        config: Config = Config()
+    ): Bitmap {
         if (targetW <= 0 || targetH <= 0) return src
 
-        val edgeColor = sampleTopEdgeColor(src, ratio = 0.05f)
+        val edgeColor = sampleTopEdgeColor(src, ratio = 0.08f)
         val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(edgeColor)
 
         val scaledW = targetW
-        val scaledH = ceil(src.height * targetW.toFloat() / src.width).toInt().coerceAtLeast(1)
+        val scaledH =
+            ceil(src.height * targetW.toFloat() / src.width).toInt().coerceAtLeast(1)
         val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
 
         val maxExtend = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt()
         val extendH = (targetH - scaledH).coerceAtLeast(0).coerceAtMost(maxExtend)
-        val srcDrawY = (targetH - scaledH).toFloat()
 
-        // ★ 先画原图
+        val srcDrawY = (targetH - scaledH).toFloat()
         canvas.drawBitmap(
             scaled,
             0f,
@@ -48,17 +59,12 @@ object WallpaperProcessor {
             Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         )
 
-        // ★ 再画延展区（模糊层会覆盖原图顶部，产生融合）
         if (extendH > 0) {
-            drawTopExtension(
-                canvas, scaled, src, targetW, extendH,
-                config.blurRadius, config.featherWidth
-            )
+            drawTopExtension(context, canvas, scaled, src, targetW, extendH, config)
         }
 
-        // 底部填充
         if (srcDrawY + scaledH < targetH) {
-            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = edgeColor }
+            val fill = Paint(Paint(ANTI_ALIAS_FLAG)).apply { color = edgeColor }
             canvas.drawRect(
                 0f,
                 (srcDrawY + scaledH).coerceAtMost(targetH.toFloat()),
@@ -73,66 +79,82 @@ object WallpaperProcessor {
     }
 
     private fun drawTopExtension(
+        context: Context,
         canvas: Canvas,
         scaled: Bitmap,
         src: Bitmap,
         targetW: Int,
         extendH: Int,
-        blurRadius: Int,
-        feather: Int
+        config: Config
     ) {
         if (extendH <= 0) return
 
-        val stripH = max(8, scaled.height / 6)
-        val topStrip = Bitmap.createBitmap(scaled, 0, 0, scaled.width, stripH)
-
-        val rotated = Bitmap.createBitmap(
-            topStrip, 0, 0, topStrip.width, topStrip.height,
-            Matrix().apply { setRotate(180f) }, true
+        // 1. 取原图顶部区域
+        val sourceH = maxOf(16, scaled.height / 4)
+        val topSource = Bitmap.createBitmap(
+            scaled, 0, 0, scaled.width, minOf(sourceH, scaled.height)
         )
-        topStrip.recycle()
 
-        val stretched = Bitmap.createScaledBitmap(rotated, targetW, extendH, true)
-        rotated.recycle()
+        // 2. 拉伸到延展区尺寸
+        val stretched = Bitmap.createScaledBitmap(topSource, targetW, extendH, true)
+        topSource.recycle()
 
-        val blurred = stackBlur(stretched, blurRadius.coerceIn(0, 80))
+        // 3. GPU 多层模糊
+        val blurred = try {
+            multiLayerGpuBlur(context, stretched, config.blurRadius)
+        } catch (e: Exception) {
+            // GPU 失败降级到 CPU
+            stackBlur(stretched, config.blurRadius.toInt().coerceIn(1, 80))
+        }
         if (blurred !== stretched) stretched.recycle()
 
-        // 极淡色调底色
+        // 4. 智能色调蒙版
         val topAvg = sampleTopEdgeColor(src, ratio = 0.12f)
-        val tone = lighten(topAvg, factor = 0.2f)
-        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(20, Color.red(tone), Color.green(tone), Color.blue(tone))
-        }
-        canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
+        val luminance = calculateLuminance(topAvg)
+        val overlayAlpha = (config.overlayStrength * 255).toInt()
 
-        // 模糊层向下延伸覆盖原图顶部
-        val effectiveFeather = feather.coerceAtLeast(50).coerceAtMost(200)
+        val overlayColor = when {
+            luminance > 0.7 -> Color.argb(overlayAlpha, 255, 255, 255)
+            luminance < 0.3 -> Color.argb(overlayAlpha, 0, 0, 0)
+            else -> {
+                val tone = lighten(topAvg, config.brightnessOffset + 0.1f)
+                Color.argb(overlayAlpha, Color.red(tone), Color.green(tone), Color.blue(tone))
+            }
+        }
+
+        // 5. 绘制
+        val effectiveFeather = config.featherWidth.coerceIn(50, 200)
         val overlayBottom = extendH + effectiveFeather
         val overlayBmp = Bitmap.createScaledBitmap(blurred, targetW, overlayBottom, true)
         if (overlayBmp !== blurred) blurred.recycle()
 
+        // 色调蒙版
+        val tonePaint = Paint(ANTI_ALIAS_FLAG).apply { color = overlayColor }
+        canvas.drawRect(0f, 0f, targetW.toFloat(), overlayBottom.toFloat(), tonePaint)
+
+        // 模糊层
         canvas.drawBitmap(
             overlayBmp,
             0f, 0f,
-            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+            Paint(ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         )
 
-        // 渐变淡出：在覆盖原图的区域让模糊层逐渐消失
-        val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+        // 6. 渐变融合（DST_IN）
+        val fadePaint = Paint(ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
                 0f, extendH.toFloat(),
                 0f, overlayBottom.toFloat(),
-                Color.TRANSPARENT,
-                Color.BLACK,
+                Color.argb(255, 255, 255, 255),
+                Color.argb(0, 255, 255, 255),
                 Shader.TileMode.CLAMP
             )
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
         }
 
         val layerId = canvas.saveLayer(
             0f, extendH.toFloat(),
-            targetW.toFloat(), overlayBottom.toFloat(), null
+            targetW.toFloat(), overlayBottom.toFloat(),
+            null
         )
         canvas.drawRect(
             0f, extendH.toFloat(),
@@ -144,11 +166,45 @@ object WallpaperProcessor {
         if (overlayBmp !== scaled) overlayBmp.recycle()
     }
 
+    // ==================== GPUImage 模糊 ====================
+
+    private fun multiLayerGpuBlur(context: Context, bitmap: Bitmap, radius: Float): Bitmap {
+        val r1 = minOf(radius, 25f)
+        val result = gpuBlur(context, bitmap, r1)
+
+        // 需要更强模糊时叠加第二层
+        return if (radius > 25f) {
+            val r2 = minOf(radius * 0.6f, 25f)
+            val second = gpuBlur(context, result, r2)
+            if (second !== result) result.recycle()
+            second
+        } else {
+            result
+        }
+    }
+
+    private fun gpuBlur(context: Context, bitmap: Bitmap, radius: Float): Bitmap {
+        val gpuImage = GPUImage(context)
+        gpuImage.setImage(bitmap)
+        val filter = GPUImageGaussianBlurFilter(radius)
+        gpuImage.setFilter(filter)
+        return gpuImage.bitmapWithFilterApplied ?: bitmap
+    }
+
+    // ==================== 色彩工具 ====================
+
+    private fun calculateLuminance(color: Int): Float {
+        val r = Color.red(color) / 255f
+        val g = Color.green(color) / 255f
+        val b = Color.blue(color) / 255f
+        return 0.299f * r + 0.587f * g + 0.114f * b
+    }
+
     private fun sampleTopEdgeColor(src: Bitmap, ratio: Float = 0.1f): Int {
-        val h = max(1, (src.height * ratio).toInt())
+        val h = maxOf(1, (src.height * ratio).toInt())
         var r = 0L; var g = 0L; var b = 0L; var count = 0L
-        val stepX = max(1, src.width / 48)
-        val stepY = max(1, h / 4)
+        val stepX = maxOf(1, src.width / 48)
+        val stepY = maxOf(1, h / 4)
         for (y in 0 until h step stepY) {
             for (x in 0 until src.width step stepX) {
                 val p = src.getPixel(x, y)
@@ -161,13 +217,24 @@ object WallpaperProcessor {
     }
 
     private fun lighten(c: Int, factor: Float = 0.5f): Int {
-        val f = factor.coerceIn(0f, 1f)
-        return Color.rgb(
-            (Color.red(c) + (255 - Color.red(c)) * f).toInt().coerceIn(0, 255),
-            (Color.green(c) + (255 - Color.green(c)) * f).toInt().coerceIn(0, 255),
-            (Color.blue(c) + (255 - Color.blue(c)) * f).toInt().coerceIn(0, 255)
-        )
+        val f = factor.coerceIn(-1f, 1f)
+        return if (f >= 0) {
+            Color.rgb(
+                (Color.red(c) + (255 - Color.red(c)) * f).toInt().coerceIn(0, 255),
+                (Color.green(c) + (255 - Color.green(c)) * f).toInt().coerceIn(0, 255),
+                (Color.blue(c) + (255 - Color.blue(c)) * f).toInt().coerceIn(0, 255)
+            )
+        } else {
+            val df = -f
+            Color.rgb(
+                (Color.red(c) * (1 - df)).toInt().coerceIn(0, 255),
+                (Color.green(c) * (1 - df)).toInt().coerceIn(0, 255),
+                (Color.blue(c) * (1 - df)).toInt().coerceIn(0, 255)
+            )
+        }
     }
+
+    // ==================== CPU 降级模糊 ====================
 
     private fun stackBlur(b: Bitmap, radius: Int): Bitmap {
         if (radius <= 0) return b
@@ -238,4 +305,6 @@ object WallpaperProcessor {
             }
         }
     }
+
+    private const val ANTI_ALIAS_FLAG = Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG
 }
