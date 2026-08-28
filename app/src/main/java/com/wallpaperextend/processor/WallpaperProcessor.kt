@@ -7,6 +7,7 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
+import android.graphics.RectF
 import android.graphics.Shader
 import kotlin.math.max
 import kotlin.math.min
@@ -24,30 +25,36 @@ object WallpaperProcessor {
         val mode: Mode = Mode.LIGHT
     )
 
+    /**
+     * 只顶部延展：
+     * - 顶部 = 原图顶部条纵向拉伸 → 高斯模糊 → 顶部浅色调统一 → 提亮降饱和
+     * - 原图从 extendH 开始，下面完全不动
+     */
     fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
         val safe = ensureOpaque(src)
         val scaled = scaleToWidth(safe, targetW)
         val srcW = scaled.width
         val srcH = scaled.height
 
-        val topH = (targetH * config.extendRatio.coerceIn(0f, 0.6f)).roundToInt().coerceAtLeast(0)
-        val outH = (topH + srcH).coerceAtLeast(targetH)
+        val extendH = if (config.topOnly) {
+            (targetH * config.extendRatio.coerceIn(0f, 0.6f)).roundToInt().coerceAtLeast(0)
+        } else {
+            0
+        }
 
+        val outH = extendH + srcH
         val out = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(backgroundBaseColor(config.mode))
 
+        if (extendH > 0) {
+            drawTopExtensionPsLike(canvas, scaled, targetW, extendH, config)
+            drawFeather(canvas, targetW, extendH, config.featherWidth.coerceAtLeast(1))
+        }
+
+        // 原图，严格从 extendH 开始
         val drawX = ((targetW - srcW) / 2f).coerceAtLeast(0f)
-
-        if (topH > 0) {
-            drawTopExtension(canvas, scaled, targetW, topH, config)
-        }
-
-        canvas.drawBitmap(scaled, drawX, topH.toFloat(), null)
-
-        if (topH > 0) {
-            drawTopFeather(canvas, targetW, topH, config.featherWidth.coerceAtLeast(1))
-        }
+        canvas.drawBitmap(scaled, drawX, extendH.toFloat(), null)
 
         if (safe !== src) safe.recycle()
         if (scaled !== src && scaled !== safe) scaled.recycle()
@@ -55,73 +62,59 @@ object WallpaperProcessor {
         return out
     }
 
-    /* ================= 内部 ================= */
+    /* ================= 顶部延展（PS 手感） ================= */
 
-    private fun backgroundBaseColor(mode: Mode): Int =
-        if (mode == Mode.DARK) Color.rgb(18, 20, 24) else Color.rgb(245, 248, 252)
-
-    private fun ensureOpaque(src: Bitmap): Bitmap {
-        if (!src.hasAlpha()) return src
-        val step = 8.coerceAtLeast(src.width / 32)
-        for (y in 0 until src.height step step) {
-            for (x in 0 until src.width step step) {
-                if (Color.alpha(src.getPixel(x, y)) < 255) {
-                    val b = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-                    Canvas(b).apply {
-                        drawColor(Color.WHITE)
-                        drawBitmap(src, 0f, 0f, null)
-                    }
-                    return b
-                }
-            }
-        }
-        return src
-    }
-
-    private fun drawTopExtension(
-        canvas: Canvas, src: Bitmap, w: Int, topH: Int, config: Config
+    private fun drawTopExtensionPsLike(
+        canvas: Canvas, src: Bitmap, w: Int, extendH: Int, config: Config
     ) {
-        if (topH <= 0) return
+        // 1. 取原图顶部一条（纵向延续背景）
+        val stripH = max(8, src.height / 40)
+        val topStrip = Bitmap.createBitmap(src, 0, 0, src.width, min(stripH, src.height))
 
-        canvas.save()
-        canvas.clipRect(0f, 0f, w.toFloat(), topH.toFloat())
+        // 2. 纵向拉伸到延展区
+        val stretched = Bitmap.createScaledBitmap(topStrip, w, extendH, true)
+        topStrip.recycle()
 
-        val baseColor = sampleAtmosphereColor(src, config.mode)
-        canvas.drawColor(baseColor)
+        // 3. 高斯模糊
+        val blurred = stackBlur(stretched, config.blurRadius.coerceIn(1, 120))
+        stretched.recycle()
 
-        val sliceH = (src.height * 0.28f).roundToInt().coerceAtLeast(1).coerceAtMost(src.height)
-        val slice = Bitmap.createBitmap(src, 0, 0, src.width, sliceH)
-        val blur = stackBlur(scaleToWidth(slice, w), config.blurRadius)
-        slice.recycle()
+        // 4. 画模糊底色
+        canvas.drawBitmap(blurred, 0f, 0f, null)
 
-        val paint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-            alpha = if (config.mode == Mode.DARK) 170 else 215
+        // 5. 向顶部浅色调轻微统一（不要强主色，不要纯色带）
+        val topAvg = sampleTopColor(src, ratio = 0.2f)
+        val dominant = extractDominantColor(src, preferLight = true)
+        val tone = lighten(topAvg, dominant, factor = 0.35f)
+
+        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP)
         }
-        canvas.drawBitmap(blur, 0f, 0f, paint)
+        canvas.drawColor(tone, PorterDuff.Mode.SRC_ATOP)
 
-        val grad = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        // 6. 整体轻微提亮、降对比，做出窗帘/光感
+        canvas.drawColor(Color.argb(18, 255, 255, 255), PorterDuff.Mode.SRC_ATOP)
+
+        // 7. 顶部往下的柔和渐变，避免任何硬边界/橙线
+        val gradPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             shader = LinearGradient(
-                0f, 0f, 0f, topH.toFloat(),
-                intArrayOf(
-                    if (config.mode == Mode.DARK) Color.argb(90, 0, 0, 0)
-                    else Color.argb(70, 255, 255, 255),
-                    Color.TRANSPARENT
-                ),
+                0f, 0f, 0f, extendH.toFloat(),
+                intArrayOf(Color.argb(40, 255, 255, 255), Color.TRANSPARENT),
                 null, Shader.TileMode.CLAMP
             )
         }
-        canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), grad)
-        grad.shader = null
+        canvas.drawRect(0f, 0f, w.toFloat(), extendH.toFloat(), gradPaint)
+        gradPaint.shader = null
 
-        blur.recycle()
-        canvas.restore()
+        blurred.recycle()
     }
 
-    private fun drawTopFeather(canvas: Canvas, w: Int, mainTop: Int, featherWidth: Int) {
-        if (mainTop <= 0) return
-        val feather = featherWidth.coerceIn(0, mainTop)
-        val startY = (mainTop - feather).toFloat()
-        val endY = mainTop.toFloat()
+    /** 原图顶部边缘柔和羽化（只在交接的一条带） */
+    private fun drawFeather(canvas: Canvas, w: Int, extendH: Int, featherWidth: Int) {
+        val feather = featherWidth.coerceIn(0, extendH)
+        val startY = (extendH - feather).toFloat()
+        val endY = extendH.toFloat()
+        if (endY <= startY) return
 
         canvas.save()
         canvas.clipRect(0f, startY, w.toFloat(), endY)
@@ -139,35 +132,83 @@ object WallpaperProcessor {
         canvas.restore()
     }
 
-    private fun sampleAtmosphereColor(src: Bitmap, mode: Mode): Int {
-        val sample = Bitmap.createScaledBitmap(src, 16, 16, true)
+    /* ================= 取色 ================= */
+
+    private fun sampleTopColor(src: Bitmap, ratio: Float): Int {
+        val sample = Bitmap.createScaledBitmap(src, 32, 32, true)
         var r = 0; var g = 0; var b = 0; var count = 0
-        val endY = (sample.height * 0.3f).roundToInt().coerceAtLeast(1)
+        val endY = (sample.height * ratio).roundToInt().coerceAtLeast(1)
         for (y in 0 until endY) {
             for (x in 0 until sample.width) {
                 val c = sample.getPixel(x, y)
-                if (Color.alpha(c) < 16) continue
+                if (Color.alpha(c) < 128) continue
                 r += Color.red(c); g += Color.green(c); b += Color.blue(c); count++
             }
         }
         sample.recycle()
-        if (count == 0) {
-            return if (mode == Mode.DARK) Color.rgb(30, 32, 48) else Color.rgb(220, 235, 245)
+        if (count == 0) return Color.WHITE
+        return Color.rgb(r / count, g / count, b / count)
+    }
+
+    private fun extractDominantColor(src: Bitmap, preferLight: Boolean): Int {
+        val sample = Bitmap.createScaledBitmap(src, 64, 64, true)
+        val counts = HashMap<Int, Int>()
+        for (y in 0 until sample.height) {
+            for (x in 0 until sample.width) {
+                val c = sample.getPixel(x, y)
+                if (Color.alpha(c) < 128) continue
+                val key = Color.rgb(
+                    (Color.red(c) / 32) * 32,
+                    (Color.green(c) / 32) * 32,
+                    (Color.blue(c) / 32) * 32
+                )
+                counts[key] = (counts[key] ?: 0) + 1
+            }
         }
-        r /= count; g /= count; b /= count
-        return if (mode == Mode.DARK) {
-            Color.rgb(
-                (r * 0.25f).roundToInt().coerceIn(0, 80),
-                (g * 0.30f).roundToInt().coerceIn(0, 90),
-                (b * 0.45f).roundToInt().coerceIn(0, 120)
-            )
-        } else {
-            Color.rgb(
-                ((r + 180) / 2).coerceIn(0, 255),
-                ((g + 205) / 2).coerceIn(0, 255),
-                ((b + 235) / 2).coerceIn(0, 255)
-            )
+        sample.recycle()
+
+        val sorted = counts.entries.sortedByDescending { it.value }
+        var r = 0; var g = 0; var b = 0; var total = 0
+        for (i in 0 until min(3, sorted.size)) {
+            val (color, count) = sorted[i]
+            // 若偏好浅色，给亮度高的更高权重
+            val lum = 0.299f * Color.red(color) + 0.587f * Color.green(color) + 0.114f * Color.blue(color)
+            val weight = count * (3 - i) * if (preferLight) (1 + lum / 255f) else 1f
+            r += (Color.red(color) * weight).roundToInt()
+            g += (Color.green(color) * weight).roundToInt()
+            b += (Color.blue(color) * weight).roundToInt()
+            total += weight.roundToInt()
         }
+        if (total == 0) return Color.rgb(225, 232, 240)
+        return Color.rgb(
+            (r / total).coerceIn(0, 255),
+            (g / total).coerceIn(0, 255),
+            (b / total).coerceIn(0, 255)
+        )
+    }
+
+    private fun lighten(c1: Int, c2: Int, factor: Float): Int {
+        val f = factor.coerceIn(0f, 1f)
+        return Color.rgb(
+            ((Color.red(c1) * (1 - f) + Color.red(c2) * f)).roundToInt().coerceIn(0, 255),
+            ((Color.green(c1) * (1 - f) + Color.green(c2) * f)).roundToInt().coerceIn(0, 255),
+            ((Color.blue(c1) * (1 - f) + Color.blue(c2) * f)).roundToInt().coerceIn(0, 255)
+        )
+    }
+
+    /* ================= 工具 ================= */
+
+    private fun backgroundBaseColor(mode: Mode): Int =
+        if (mode == Mode.DARK) Color.rgb(18, 20, 24) else Color.rgb(245, 248, 252)
+
+    private fun ensureOpaque(src: Bitmap): Bitmap {
+        if (!src.hasAlpha()) return src
+        val b = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        Canvas(b).apply {
+            drawColor(Color.WHITE)
+            drawBitmap(src, 0f, 0f, null)
+        }
+        return b
     }
 
     private fun scaleToWidth(src: Bitmap, targetW: Int): Bitmap {
@@ -176,7 +217,7 @@ object WallpaperProcessor {
         return Bitmap.createScaledBitmap(src, targetW, targetH, true)
     }
 
-    /* ================= 安全的栈模糊（模运算防越界） ================= */
+    /* ================= 栈模糊（模运算防越界） ================= */
 
     private fun stackBlur(s: Bitmap, radius: Int): Bitmap {
         val r = radius.coerceIn(1, 255)
@@ -184,16 +225,10 @@ object WallpaperProcessor {
         val h = s.height
         if (w <= 0 || h <= 0) return s
 
-        // 超大图先缩小再模糊，避免 OOM + 索引溢出
         val MAX_DIM = 1024
         val work = if (max(w, h) > MAX_DIM) {
             val scale = MAX_DIM.toFloat() / max(w, h)
-            Bitmap.createScaledBitmap(
-                s,
-                (w * scale).roundToInt().coerceAtLeast(1),
-                (h * scale).roundToInt().coerceAtLeast(1),
-                true
-            )
+            Bitmap.createScaledBitmap(s, (w * scale).roundToInt().coerceAtLeast(1), (h * scale).roundToInt().coerceAtLeast(1), true)
         } else {
             s
         }
@@ -204,7 +239,6 @@ object WallpaperProcessor {
         val pixels = IntArray(size)
         work.getPixels(pixels, 0, ww, 0, 0, ww, hh)
 
-        // 半径按实际尺寸再钳制，保证 2*radius+1 <= min(w,h)
         val maxRad = (min(ww, hh) - 1) / 2
         val rad = min(r, maxRad).coerceAtLeast(1)
 
@@ -222,18 +256,10 @@ object WallpaperProcessor {
         return out
     }
 
-    /** 横向栈模糊：用模运算保证索引永不越界 */
     private fun stackBlurH(pixels: IntArray, w: Int, h: Int, radius: Int) {
         val div = (2 * radius + 1).coerceAtLeast(1)
-        val divSum = ((div + 1) shr 1) * ((div + 1) shr 1)
-        val dv = IntArray(256 * divSum)
-        for (i in dv.indices) dv[i] = i / divSum
-        val maxVal = 255 * divSum
-
-        val rSum = IntArray(w)
-        val gSum = IntArray(w)
-        val bSum = IntArray(w)
-        val aSum = IntArray(w)
+        val dv = IntArray(256 * div)
+        for (i in 0 until 256 * div) dv[i] = i / div
 
         for (y in 0 until h) {
             var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
@@ -243,20 +269,17 @@ object WallpaperProcessor {
                 sumR += Color.red(p); sumG += Color.green(p); sumB += Color.blue(p); sumA += Color.alpha(p)
             }
             for (x in 0 until w) {
-                val yi = y * w + x
-                pixels[yi] = Color.argb(
-                    dv[sumA.coerceIn(0, maxVal)],
-                    dv[sumR.coerceIn(0, maxVal)],
-                    dv[sumG.coerceIn(0, maxVal)],
-                    dv[sumB.coerceIn(0, maxVal)]
+                val outIdx = y * w + x
+                pixels[outIdx] = Color.argb(
+                    dv[sumA.coerceIn(0, 255 * div)],
+                    dv[sumR.coerceIn(0, 255 * div)],
+                    dv[sumG.coerceIn(0, 255 * div)],
+                    dv[sumB.coerceIn(0, 255 * div)]
                 )
-
                 val xiOut = (x - radius + w) % w
                 val xiIn = (x + radius + 1 + w) % w
-
                 val pOut = pixels[y * w + xiOut]
                 val pIn = pixels[y * w + xiIn]
-
                 sumR += Color.red(pIn) - Color.red(pOut)
                 sumG += Color.green(pIn) - Color.green(pOut)
                 sumB += Color.blue(pIn) - Color.blue(pOut)
@@ -265,33 +288,27 @@ object WallpaperProcessor {
         }
     }
 
-    /** 纵向栈模糊：用模运算保证索引永不越界 */
     private fun stackBlurV(pixels: IntArray, w: Int, h: Int, radius: Int) {
         val div = (2 * radius + 1).coerceAtLeast(1)
-        val divSum = ((div + 1) shr 1) * ((div + 1) shr 1)
-        val dv = IntArray(256 * divSum)
-        for (i in dv.indices) dv[i] = i / divSum
-        val maxVal = 255 * divSum
+        val dv = IntArray(256 * div)
+        for (i in 0 until 256 * div) dv[i] = i / div
 
         for (x in 0 until w) {
             var sumR = 0; var sumG = 0; var sumB = 0; var sumA = 0
             for (i in -radius..radius) {
                 val yi = ((i + h) % h) * w + x
-                sumR += Color.red(pixels[yi]); sumG += Color.green(pixels[yi])
-                sumB += Color.blue(pixels[yi]); sumA += Color.alpha(pixels[yi])
+                sumR += Color.red(pixels[yi]); sumG += Color.green(pixels[yi]); sumB += Color.blue(pixels[yi]); sumA += Color.alpha(pixels[yi])
             }
             for (y in 0 until h) {
-                val yi = y * w + x
-                pixels[yi] = Color.argb(
-                    dv[sumA.coerceIn(0, maxVal)],
-                    dv[sumR.coerceIn(0, maxVal)],
-                    dv[sumG.coerceIn(0, maxVal)],
-                    dv[sumB.coerceIn(0, maxVal)]
+                val outIdx = y * w + x
+                pixels[outIdx] = Color.argb(
+                    dv[sumA.coerceIn(0, 255 * div)],
+                    dv[sumR.coerceIn(0, 255 * div)],
+                    dv[sumG.coerceIn(0, 255 * div)],
+                    dv[sumB.coerceIn(0, 255 * div)]
                 )
-
                 val yiOut = ((y - radius + h) % h) * w + x
                 val yiIn = ((y + radius + 1 + h) % h) * w + x
-
                 sumR += Color.red(pixels[yiIn]) - Color.red(pixels[yiOut])
                 sumG += Color.green(pixels[yiIn]) - Color.green(pixels[yiOut])
                 sumB += Color.blue(pixels[yiIn]) - Color.blue(pixels[yiOut])
