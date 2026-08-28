@@ -25,7 +25,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="iOS 17 / ColorOS 16 风格壁纸延展 · 自然过渡 · 支持保存到相册"
+            android:text="NPU 神经网络延展 · LaMa ONNX 端侧推理 · iOS 18 风格"
             android:textSize="13sp"
             android:gravity="center"
             android:textColor="@color/text_secondary"
@@ -77,14 +77,14 @@
                 android:id="@+id/cbTopOnly"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="仅顶部延展（底部保留原图，更接近 iOS 17）"
+                android:text="仅顶部延展（更接近 iOS 18）"
                 android:checked="true"
                 android:textSize="13sp"
                 android:textColor="@color/text_secondary"
                 android:layout_marginTop="8dp" />
         </LinearLayout>
 
-        <!-- 原图预览（PhotoView 可缩放） -->
+        <!-- 原图预览 -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
@@ -102,7 +102,7 @@
             android:background="@color/card"
             android:contentDescription="原图预览" />
 
-        <!-- ★ 参数调节（已补全所有控件） -->
+        <!-- 参数调节 -->
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -112,30 +112,13 @@
             android:layout_marginTop="16dp"
             android:layout_marginBottom="16dp">
 
-            <!-- 模糊半径 -->
-            <TextView
-                android:id="@+id/tvBlur"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="模糊半径: 20"
-                android:textSize="14sp"
-                android:textColor="@color/text_primary" />
-            <SeekBar
-                android:id="@+id/seekBlur"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:max="60"
-                android:progress="20" />
-
-            <!-- 延展比例 -->
             <TextView
                 android:id="@+id/tvExtend"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="延展比例: 37%"
                 android:textSize="14sp"
-                android:textColor="@color/text_primary"
-                android:layout_marginTop="8dp" />
+                android:textColor="@color/text_primary" />
             <SeekBar
                 android:id="@+id/seekExtend"
                 android:layout_width="match_parent"
@@ -143,7 +126,21 @@
                 android:max="60"
                 android:progress="37" />
 
-            <!-- 羽化宽度 -->
+            <TextView
+                android:id="@+id/tvBlur"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="模糊半径: 20"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary"
+                android:layout_marginTop="8dp" />
+            <SeekBar
+                android:id="@+id/seekBlur"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="60"
+                android:progress="20" />
+
             <TextView
                 android:id="@+id/tvFeather"
                 android:layout_width="wrap_content"
@@ -159,7 +156,6 @@
                 android:max="300"
                 android:progress="150" />
 
-            <!-- ★ 饱和度 -->
             <TextView
                 android:id="@+id/tvSaturation"
                 android:layout_width="wrap_content"
@@ -175,7 +171,6 @@
                 android:max="150"
                 android:progress="60" />
 
-            <!-- ★ 亮度 -->
             <TextView
                 android:id="@+id/tvBrightness"
                 android:layout_width="wrap_content"
@@ -191,7 +186,6 @@
                 android:max="100"
                 android:progress="50" />
 
-            <!-- ★ 蒙版强度 -->
             <TextView
                 android:id="@+id/tvOverlay"
                 android:layout_width="wrap_content"
@@ -208,7 +202,7 @@
                 android:progress="15" />
         </LinearLayout>
 
-        <!-- 结果预览（PhotoView 可缩放） -->
+        <!-- 结果预览 -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
