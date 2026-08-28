@@ -19,51 +19,28 @@ object WallpaperExtend {
      * 通过接缝渐变让延展区底部与原图顶部自然融合（不再有白块/硬线）。
      */
     fun extendTop(src: Bitmap, extendH: Int, featherH: Int, blurRadius: Int): Bitmap {
-    val w = src.width
-    val h = src.height
-    val totalH = h + extendH
-    
-    // 1. 提取主色调（针对粉发图，会提取到粉色）
-    val dominantColor = getDominantColor(src)
-    
-    // 2. 创建输出画布
-    val base = Bitmap.createBitmap(w, totalH, Bitmap.Config.ARGB_8888)
-    val canvas = Canvas(base)
-    
-    // 3. 画延展区底色（直接用主色调填充，避免拉伸出白边）
-    val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    paint.color = dominantColor
-    canvas.drawRect(0f, 0f, w.toFloat(), extendH.toFloat(), paint)
-    
-    // 4. 截取原图顶部，模糊后贴上去融合（增加氛围感）
-    val topSrc = Bitmap.createBitmap(src, 0, 0, w, min(extendH, h))
-    val blurredTop = fastBlur(topSrc, blurRadius.coerceIn(1, 60))
-    canvas.drawBitmap(blurredTop, 0f, 0f, paint)
-    
-    // 5. 将原图完整画在下方（保证人物完整不裁切）
-    canvas.drawBitmap(src, 0f, extendH.toFloat(), paint)
-    
-    // 6. 核心：在接缝处画 DST_OUT 渐变蒙版（彻底擦除硬边）
-    val actualFeather = min(featherH, extendH)
-    if (actualFeather > 0) {
-        // 渐变从透明（顶部延展区）到黑色（接缝处），配合 DST_OUT 擦除接缝
-        val gradient = LinearGradient(
-            0f, (extendH - actualFeather).toFloat(), 
-            0f, extendH.toFloat(), 
-            Color.TRANSPARENT, 
-            Color.BLACK, 
-            Shader.TileMode.CLAMP
-        )
-        paint.shader = gradient
-        paint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-        canvas.drawRect(0f, (extendH - actualFeather).toFloat(), w.toFloat(), extendH.toFloat(), paint)
+        val safe = ensureOpaque(src)
+        val srcW = safe.width
+        val srcH = safe.height
+
+        val topH = extendH.coerceAtLeast(0)
+        val outH = topH + srcH
+        val out = Bitmap.createBitmap(srcW, outH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+
+        // 延展区画在 [0, topH]
+        if (topH > 0) {
+            drawTopExtension(canvas, safe, srcW, topH, blurRadius, featherH)
+        }
+
+        // 原图画在延展区下方，完整保留
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        canvas.drawBitmap(safe, 0f, topH.toFloat(), paint)
+
+        if (safe !== src) safe.recycle()
+        return out
     }
-    
-    // 清理
-    topSrc.recycle()
-    blurredTop.recycle()
-    return base
-}
 
     /**
      * 只底部延展（对称实现）：原图上方不动，下方追加过渡区。
@@ -72,9 +49,9 @@ object WallpaperExtend {
         val safe = ensureOpaque(src)
         val srcW = safe.width
         val srcH = safe.height
+
         val bottomH = extendH.coerceAtLeast(0)
         val outH = srcH + bottomH
-
         val out = Bitmap.createBitmap(srcW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
         canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
@@ -117,21 +94,21 @@ object WallpaperExtend {
             Color.red(topAvg), Color.green(topAvg), Color.blue(topAvg))
         canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), tonePaint)
 
-        // 顶部往下的轻微提亮，做出 iOS 那种"呼吸感"
+        // 顶部往下的轻微提亮
         tonePaint.color = Color.argb(14, 255, 255, 255)
         canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), tonePaint)
 
         // 5) 接缝融合（关键）：
         //    延展区底部（靠近原图的一侧）渐隐，让原图自然透上来。
         //    DST_OUT + 渐变：透明→黑 表示 保留→清除。
-        //    【修正】startY 处（远离原图）=透明（保留），endY 处（接缝）=黑色（清除），
+        //    startY 处（远离原图/顶部）=透明（保留），endY 处（接缝）=黑色（清除），
         //    即延展区从下往上逐渐保留，底部边缘最淡，实现与原图的柔和过渡。
         val f = feather.coerceIn(8, topH)
         val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG)
         fadePaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
         fadePaint.shader = LinearGradient(
             0f, (topH - f).toFloat(), 0f, topH.toFloat(),
-            intArrayOf(Color.TRANSPARENT, Color.BLACK), // 远接缝→保��� ; 接缝→清除
+            intArrayOf(Color.TRANSPARENT, Color.BLACK), // 远接缝→保留 ; 接缝→清除
             floatArrayOf(0f, 1f),
             Shader.TileMode.CLAMP
         )
@@ -153,7 +130,8 @@ object WallpaperExtend {
         val blurred = stackBlur(stretched, blurRadius)
         stretched.recycle()
 
-        canvas.drawBitmap(blurred, 0f, srcH.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        canvas.drawBitmap(blurred, 0f, srcH.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
 
         val bottomAvg = sampleBottomColor(src, 0.2f)
         val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -229,7 +207,7 @@ object WallpaperExtend {
 
     private fun stackBlur(s: Bitmap, radius: Int): Bitmap {
         // 放宽上限，让 UI 的 blurRadius(25~35) 真正生效
-        val r = radius.coerceIn(1, 120)
+        val radIn = radius.coerceIn(1, 120)
         val w = s.width
         val h = s.height
         if (w <= 0 || h <= 0) return s
@@ -246,13 +224,12 @@ object WallpaperExtend {
         val ww = work.width
         val hh = work.height
         val size = ww * hh
-
         val pixels = IntArray(size)
         work.getPixels(pixels, 0, ww, 0, 0, ww, hh)
 
         // 半径按实际尺寸再钳制，保证模运算不会越界
         val maxRad = (min(ww, hh) - 1) / 2
-        val rad = min(r, maxRad).coerceAtLeast(1)
+        val rad = min(radIn, maxRad).coerceAtLeast(1)
 
         try {
             stackBlurH(pixels, ww, hh, rad)
