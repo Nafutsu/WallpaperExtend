@@ -7,386 +7,377 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
-import android.graphics.RadialGradient
-import android.graphics.Rect
 import android.graphics.Shader
 import kotlin.math.roundToInt
 
-/**
- * iOS 17 / ColorOS 16 风格 "Extend Wallpaper" 效果：
- *
- * ⚠️ 核心约束（已修复）：
- * - 【只顶部延展】：topOnly 固定为 true，底部绝不补任何内容。
- * - 输出画布布局：
- *     [0 .. mainTop]          → 顶部延展氛围区（采样色 + 模糊 + 渐变 + 光晕，全部 clip 在此区间）
- *     [mainTop .. outH]       → 清晰主体（fitCenter 放置，略偏下）
- *     ★ 主体下方到 outH 之间不做任何绘制，保持透明/底色，不生成伪影
- * - 所有装饰层（渐变/光晕/模糊带）严格 clip 到 [0, mainTop]，禁止越界到主体或底部。
- * - 模糊/缩放使用 copy 后的干净 Bitmap，禁止对带透明边框的 Bitmap 直接模糊导致边缘色带。
- */
 object WallpaperProcessor {
 
     enum class Mode { LIGHT, DARK }
 
     data class Config(
-        val blurRadius: Int = 60,
-        /** 顶部延展比例（占原图高度的比例），0 表示不延展 */
-        val extendRatio: Float = 0.34f,
-        /** 主体顶部与延展区之间的羽化宽度（px） */
+        val blurRadius: Int = 56,
+        val extendRatio: Float = 0.32f,
         val featherWidth: Int = 120,
-        /** ⚠️ 强制 true：只顶部延展，即使传 false 也会被忽略并打印警告 */
         val topOnly: Boolean = true,
-        /** 输出高度(px)。0 = 自动（原高 + 顶部延展高度） */
-        val targetHeightPx: Int = 0,
         val mode: Mode = Mode.LIGHT
-    ) {
-        /** 对外始终表现为只顶部延展，防止旧调用传 false 导致底部延展 */
-        fun effectiveTopOnly(): Boolean = true
-    }
+    )
 
-    fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
-        // 1. 统一宽度，避免缩放误差
-        val scaled = scaleToWidth(src, targetW)
-        val extendH = (scaled.height * config.extendRatio).roundToInt().coerceAtLeast(0)
-        // ★ 底部延展高度永远为 0
-        val bottomExtendH = 0
+    fun process(
+        src: Bitmap,
+        targetW: Int,
+        targetH: Int,
+        config: Config = Config()
+    ): Bitmap {
+        val safeSrc = ensureOpaque(src)
 
-        val outH = if (config.targetHeightPx > 0) {
-            config.targetHeightPx.coerceAtLeast(scaled.height)
-        } else {
-            scaled.height + extendH + bottomExtendH
-        }
+        val scaled = scaleToWidth(safeSrc, targetW)
+        val srcW = scaled.width
+        val srcH = scaled.height
 
-        val result = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(result)
+        val topOnly = effectiveTopOnly(config.topOnly)
+        val topH = (targetH * config.extendRatio.coerceIn(0f, 0.6f)).toInt()
+        val bottomH = 0 // 当前强制不向下延展
+        val mainTop = topH
+        val mainBottom = mainTop + srcH
+        val outH = targetH
 
-        val mainTop = extendH
+        val out = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(backgroundBaseColor(config.mode))
 
-        // ===== 第一步：只填充延展区 [0, mainTop]，主体区 [mainTop, outH] 暂不绘制 =====
-        canvas.save()
-        canvas.clipRect(0, 0, targetW, mainTop)  // ★ 严格裁剪，任何绘制都不会落到主体/底部
+        val drawX = ((targetW - srcW) / 2f)
 
-        // 2. 底色：采样原图顶部色调（不过度提亮）
-        canvas.drawColor(sampleAtmosphereColor(scaled, mode = config.mode))
+        drawTopExtension(canvas, scaled, targetW, topH, config, srcW, srcH, drawX)
 
-        // 3. 氛围背景：放大 + 模糊的原图，铺满延展区（clip 后只可见在 [0, mainTop]）
-        if (extendH > 0) {
-            val actualBlur = (config.blurRadius.coerceIn(1, 100) / 4).coerceIn(4, 25)
-            val blurredBg = blur(scaled, actualBlur)
-            if (blurredBg != null) {
-                // scaleToFill 用干净副本，避免边缘透明像素参与缩放产生彩边
-                val clean = ensureOpaque(blurredBg)
-                val bg = scaleToFill(clean, targetW, mainTop)
-                canvas.drawBitmap(bg, null, Rect(0, 0, targetW, mainTop), Paint(Paint.FILTER_BITMAP_FLAG))
-                if (bg != clean) bg.recycle()
-                if (blurredBg != clean) blurredBg.recycle()
-            }
+        // 主体只画在 mainTop 开始位置
+        canvas.drawBitmap(scaled, drawX, mainTop.toFloat(), null)
 
-            // 4. 顶部→主体方向渐变：延展区底部逐渐透明，让主体自然显现
-            drawExtendGradient(canvas, targetW, extendH, config.mode)
+        // 顶部融合羽化，严格限制在顶部延展区
+        drawTopFeather(canvas, targetW, topH, config.featherWidth)
 
-            // 5. 顶部柔光/雾气（iOS 感）
-            drawTopGlow(canvas, targetW, extendH, config.mode)
-        }
+        if (safeSrc !== src) safeSrc.recycle()
+        if (scaled !== src) scaled.recycle()
 
-        canvas.restore()  // ★ 解除裁剪，后续只在主体区绘制
-
-        // ===== 第二步：绘制清晰主体，位置 fitCenter 略偏下 =====
-        val placed = fitCenterRect(scaled.width, scaled.height, targetW, outH)
-        val offsetY = (outH * 0.02f).toInt()
-        val finalRect = Rect(placed.left, placed.top + offsetY, placed.right, placed.bottom + offsetY)
-        // ★ 只允许画在 [mainTop, outH]，若主体被 clip 到延展区内则下移
-        val drawRect = if (finalRect.top < mainTop) {
-            finalRect.offsetTo(finalRect.left, mainTop)
-        } else {
-            finalRect
-        }
-        canvas.drawBitmap(scaled, null, drawRect, Paint(Paint.FILTER_BITMAP_FLAG))
-
-        // ===== 第三步：顶部羽化融合（仅顶部一条带，clip 到延展区）=====
-        if (extendH > 0 && config.featherWidth > 0) {
-            canvas.save()
-            canvas.clipRect(0, 0, targetW, mainTop)  // ★ 再次确保不污染主体/底部
-            drawFeatherBand(result, scaled, targetW, mainTop, config.featherWidth, config.mode)
-            canvas.restore()
-        }
-
-        // ★ 底部 [mainTop + scaled.height, outH] 完全不绘制，不会有任何延展/伪影
-
-        return result
-    }
-
-    /** 顶部延展区：从氛围色（顶部）渐变到透明（靠近主体处），形成柔和过渡 */
-    private fun drawExtendGradient(canvas: Canvas, w: Int, extendH: Int, mode: Mode) {
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        // 渐变覆盖延展区下半部分（靠近主体处开始透明），75% 处起过渡
-        val gradStart = (extendH * 0.45f).roundToInt().coerceAtLeast(0)
-        val gradEnd = extendH
-        if (gradEnd <= gradStart) return
-        val c1 = if (mode == Mode.DARK) Color.argb(235, 30, 32, 48) else Color.argb(235, 235, 242, 252)
-        paint.shader = LinearGradient(
-            0f, gradStart.toFloat(), 0f, gradEnd.toFloat(),
-            intArrayOf(c1, Color.TRANSPARENT),
-            floatArrayOf(0f, 1f),
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, gradStart.toFloat(), w.toFloat(), gradEnd.toFloat(), paint)
-        paint.shader = null
-    }
-
-    private fun drawTopGlow(canvas: Canvas, w: Int, extendH: Int, mode: Mode) {
-        val glowH = (extendH * 0.9f).roundToInt().coerceAtLeast(w / 8)
-        val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-        // ★ 光晕中心固定在顶部区域，绝不延伸到主体/底部
-        val centerY = (extendH * 0.18f).roundToInt().coerceAtLeast(0)
-        val radius = w * 0.6f
-        val (centerColor, edgeColor) = if (mode == Mode.DARK) {
-            Color.argb(60, 90, 100, 150) to Color.TRANSPARENT
-        } else {
-            Color.argb(45, 210, 230, 255) to Color.TRANSPARENT
-        }
-        paint.shader = RadialGradient(
-            w / 2f, centerY.toFloat(), radius,
-            centerColor, edgeColor,
-            Shader.TileMode.CLAMP
-        )
-        canvas.drawRect(0f, 0f, w.toFloat(), glowH.toFloat(), paint)
-        paint.shader = null
-    }
-
-    /**
-     * 羽化融合带：在主体顶边上方画一条模糊的边缘带，用 DST_IN 渐变蒙版
-     * 让主体顶部"融进"延展区。
-     * ★ 只作用于 [mainTop - feather, mainTop]，clip 保证不越界。
-     */
-    private fun drawFeatherBand(
-        result: Bitmap, src: Bitmap, w: Int, mainTop: Int, feather: Int, mode: Mode
-    ) {
-        val featherTop = (mainTop - feather).coerceAtLeast(0)
-        val featherBottom = mainTop.coerceAtMost(result.height)
-        if (featherBottom <= featherTop) return
-
-        // 取主体顶部一条带，缩放成羽化高度，做模糊
-        val bandH = (src.height * 0.3f).roundToInt().coerceAtLeast(2).coerceAtMost(src.height)
-        val band = Bitmap.createBitmap(src, 0, 0, src.width, bandH)
-        val actualBlur = 12
-        val blurred = blur(band, actualBlur)
-        band.recycle()
-        if (blurred == null) return
-
-        val clean = ensureOpaque(blurred)
-        val scaledBlur = Bitmap.createScaledBitmap(clean, w, featherBottom - featherTop, true)
-        if (clean != blurred) blurred.recycle()
-
-        // 离屏：画模糊带
-        val layer = Bitmap.createBitmap(w, result.height, Bitmap.Config.ARGB_8888)
-        val layerCanvas = Canvas(layer)
-        layerCanvas.drawBitmap(scaledBlur, null, Rect(0, featherTop, w, featherBottom), Paint(Paint.FILTER_BITMAP_FLAG))
-
-        // 蒙版：靠近主体(下)侧从透明→不透明，让延展区底部渐隐
-        val maskPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-            shader = LinearGradient(
-                0f, featherTop.toFloat(), 0f, featherBottom.toFloat(),
-                intArrayOf(Color.TRANSPARENT, Color.BLACK),
-                floatArrayOf(0f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        layerCanvas.drawRect(0f, featherTop.toFloat(), w.toFloat(), featherBottom.toFloat(), maskPaint)
-
-        // 合成到 result（此时外层已 clip [0, mainTop]，只会盖住延展区顶部一条）
-        val composeCanvas = Canvas(result)
-        composeCanvas.drawBitmap(layer, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG))
-        layer.recycle()
-        scaledBlur.recycle()
-    }
-
-    // ============ 工具函数 ============
-
-    private fun scaleToWidth(src: Bitmap, targetW: Int): Bitmap {
-        if (targetW <= 0) return src
-        if (src.width == targetW) return src
-        val targetH = (targetW.toFloat() / src.width * src.height).roundToInt().coerceAtLeast(1)
-        return Bitmap.createScaledBitmap(src, targetW, targetH, true)
-    }
-
-    /** 铺满缩放：基于不透明副本，避免透明边缘产生彩色拉伸伪影 */
-    private fun scaleToFill(src: Bitmap, dstW: Int, dstH: Int): Bitmap {
-        val clean = ensureOpaque(src)
-        val srcRatio = clean.width.toFloat() / clean.height
-        val dstRatio = dstW.toFloat() / dstH
-        val (outW, outH) = if (srcRatio > dstRatio) {
-            val h = dstH
-            val w = (h * srcRatio).roundToInt()
-            w to h
-        } else {
-            val w = dstW
-            val h = (w / srcRatio).roundToInt()
-            w to h
-        }
-        val result = Bitmap.createScaledBitmap(clean, outW, outH, true)
-        if (clean != src) clean.recycle()
-        return result
-    }
-
-    /**
-     * 确保 Bitmap 不透明：用采样底色填充透明区域。
-     * ★ 关键：消除 PNG 透明像素在模糊/缩放时产生的彩虹色带/边缘伪影。
-     */
-    private fun ensureOpaque(src: Bitmap): Bitmap {
-        if (src.config == Bitmap.Config.ARGB_8888 && !src.hasAlpha) return src
-        val fillColor = sampleAtmosphereColor(src, mode = Mode.LIGHT) // 任意 mode 都行，仅作底色
-        val out = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
-        val c = Canvas(out)
-        c.drawColor(fillColor)
-        c.drawBitmap(src, 0f, 0f, null)
         return out
     }
 
-    private fun fitCenterRect(srcW: Int, srcH: Int, dstW: Int, dstH: Int): Rect {
-        val srcRatio = srcW.toFloat() / srcH
-        val dstRatio = dstW.toFloat() / dstH
-        val (outW, outH) = if (srcRatio > dstRatio) {
-            dstW to (dstW / srcRatio).roundToInt()
-        } else {
-            (dstH * srcRatio).roundToInt() to dstH
-        }
-        val left = (dstW - outW) / 2
-        val top = (dstH - outH) / 2
-        return Rect(left, top, left + outW, top + outH)
+    private fun effectiveTopOnly(requested: Boolean): Boolean = true
+
+    private fun backgroundBaseColor(mode: Mode): Int =
+        if (mode == Mode.DARK) Color.rgb(18, 20, 24)
+        else Color.rgb(245, 248, 252)
+
+    private fun ensureOpaque(src: Bitmap): Bitmap {
+        if (!needsOpaqueFix(src)) return src
+
+        val b = Bitmap.createBitmap(src.width, src.height, Bitmap.Config.ARGB_8888)
+        val c = Canvas(b)
+        c.drawColor(Color.WHITE)
+        c.drawBitmap(src, 0f, 0f, null)
+        return b
     }
 
-    /**
-     * 采样氛围色：只取原图顶部区域，加权平均。
-     * - 不做强制提白，保留原图色调
-     * - LIGHT：偏亮带色调；DARK：压暗成冷灰紫
-     */
+    private fun needsOpaqueFix(src: Bitmap): Boolean {
+        if (src.config == Bitmap.Config.ALPHA_8) return true
+        // 抽样检查透明边缘/透明像素，避免模糊把透明混出彩边
+        val step = 8.coerceAtLeast(src.width / 32)
+        val ys = listOf(0, src.height - 1)
+        val xs = listOf(0, src.width - 1)
+        for (y in ys) {
+            for (x in xs) {
+                if (Color.alpha(src.getPixel(x.coerceIn(0, src.width - 1),
+                        y.coerceIn(0, src.height - 1))) < 255) return true
+            }
+        }
+        for (y in 0 until src.height step step) {
+            for (x in 0 until src.width step step) {
+                if (Color.alpha(src.getPixel(x, y)) < 255) return true
+            }
+        }
+        return false
+    }
+
+    private fun drawTopExtension(
+        canvas: Canvas,
+        src: Bitmap,
+        w: Int,
+        topH: Int,
+        config: Config,
+        srcW: Int,
+        srcH: Int,
+        drawX: Float
+    ) {
+        if (topH <= 0) return
+
+        canvas.save()
+        canvas.clipRect(0f, 0f, w.toFloat(), topH.toFloat())
+
+        val baseColor = sampleAtmosphereColor(src, config.mode)
+        canvas.drawColor(baseColor)
+
+        // 用原图顶部区域做模糊氛围，只画到顶部区域
+        val sliceH = (srcH * 0.28f).coerceAtLeast(1).coerceAtMost(srcH)
+        val slice = Bitmap.createBitmap(src, 0, 0, srcW, sliceH)
+        val blur = fastStackBlur(scaleToWidth(slice, w), config.blurRadius.coerceIn(0, 120))
+        slice.recycle()
+
+        val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+        // 让模糊氛围淡一点，避免压过原图融合
+        paint.alpha = if (config.mode == Mode.DARK) 170 else 215
+        canvas.drawBitmap(blur, 0f, 0f, paint)
+
+        // 从上往下轻微渐变，让时钟区更干净
+        val grad = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            shader = LinearGradient(
+                0f, 0f,
+                0f, topH.toFloat(),
+                intArrayOf(
+                    if (config.mode == Mode.DARK) Color.argb(90, 0, 0, 0)
+                    else Color.argb(70, 255, 255, 255),
+                    Color.TRANSPARENT
+                ),
+                null,
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, 0f, w.toFloat(), topH.toFloat(), grad)
+
+        blur.recycle()
+        canvas.restore()
+    }
+
+    private fun drawTopFeather(canvas: Canvas, w: Int, topH: Int, featherWidth: Int) {
+        if (topH <= 0) return
+        val feather = featherWidth.coerceIn(0, topH)
+        val startY = (topH - feather).toFloat()
+        val endY = topH.toFloat()
+
+        canvas.save()
+        canvas.clipRect(0f, startY, w.toFloat(), endY)
+
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            shader = LinearGradient(
+                0f, startY,
+                0f, endY,
+                intArrayOf(Color.TRANSPARENT, Color.BLACK),
+                null,
+                Shader.TileMode.CLAMP
+            )
+        }
+        canvas.drawRect(0f, startY, w.toFloat(), endY, paint)
+        canvas.restore()
+    }
+
     private fun sampleAtmosphereColor(src: Bitmap, mode: Mode): Int {
-        val sample = Bitmap.createScaledBitmap(src, 24, 24, true)
+        val sample = Bitmap.createScaledBitmap(src, 16, 16, true)
         var r = 0; var g = 0; var b = 0; var count = 0
-        // 只采样顶部 40% 区域
-        val yEnd = (sample.height * 0.4f).roundToInt().coerceAtLeast(1)
-        for (y in 0 until yEnd) {
+        val endY = (sample.height * 0.3f).roundToInt().coerceAtLeast(1)
+        for (y in 0 until endY) {
             for (x in 0 until sample.width) {
                 val c = sample.getPixel(x, y)
-                r += Color.red(c); g += Color.green(c); b += Color.blue(c); count++
+                if (Color.alpha(c) < 16) continue
+                r += Color.red(c)
+                g += Color.green(c)
+                b += Color.blue(c)
+                count++
             }
         }
         sample.recycle()
-        if (count == 0) return if (mode == Mode.DARK) Color.rgb(30, 32, 48) else Color.rgb(235, 242, 252)
-        r /= count; g /= count; b /= count
+        if (count == 0) {
+            return if (mode == Mode.DARK) Color.rgb(30, 32, 48)
+            else Color.rgb(220, 235, 245)
+        }
+
+        r /= count
+        g /= count
+        b /= count
 
         return if (mode == Mode.DARK) {
             Color.rgb(
-                (r * 0.25f + 20).toInt().coerceIn(0, 80),
-                (g * 0.25f + 24).toInt().coerceIn(0, 90),
-                (b * 0.30f + 45).toInt().coerceIn(0, 120)
+                (r * 0.25f).roundToInt().coerceIn(0, 80),
+                (g * 0.30f).roundToInt().coerceIn(0, 90),
+                (b * 0.45f).roundToInt().coerceIn(0, 120)
             )
         } else {
-            // 轻度提亮但保留色调，不再粗暴取白
             Color.rgb(
-                ((r + 200) / 2).coerceIn(0, 255),
-                ((g + 215) / 2).coerceIn(0, 255),
+                ((r + 180) / 2).coerceIn(0, 255),
+                ((g + 205) / 2).coerceIn(0, 255),
                 ((b + 235) / 2).coerceIn(0, 255)
             )
         }
     }
 
-    /**
-     * 栈模糊（Stack Blur），支持大半径。
-     * 使用像素环绕（% w / % h）做边界处理——但这只对"铺满画面"的图有意义。
-     * 为彻底避免边缘色带，调用方应先通过 ensureOpaque 填充底色。
-     */
-    private fun blur(src: Bitmap, radius: Int): Bitmap? {
-        val r = radius.coerceIn(1, 255)
-        if (src.width <= 0 || src.height <= 0) return null
-        // 大半径时先缩小再模糊再放大，性能更好且模糊更"化"
-        val down = (r / 6).coerceIn(1, 8)
-        val smallW = (src.width / down).coerceAtLeast(2)
-        val smallH = (src.height / down).coerceAtLeast(2)
-        val small = Bitmap.createScaledBitmap(src, smallW, smallH, true)
-        val blurredSmall = stackBlur(small, (r / down).coerceIn(1, 255))
-        if (small != src) small.recycle()
-        if (blurredSmall == null) return null
-        val out = Bitmap.createScaledBitmap(blurredSmall, src.width, src.height, true)
-        if (blurredSmall != small) blurredSmall.recycle()
+    private fun scaleToWidth(src: Bitmap, targetW: Int): Bitmap {
+        if (src.width == targetW) return src
+        val targetH = (targetW.toFloat() / src.width * src.height)
+            .roundToInt()
+            .coerceAtLeast(1)
+        return Bitmap.createScaledBitmap(src, targetW, targetH, true)
+    }
+
+    // 简单栈模糊，避免引入额外依赖；半径会钳制，性能可接受
+    private fun fastStackBlur(s: Bitmap, radius: Int): Bitmap {
+        if (radius <= 0) return s
+        val w = s.width
+        val h = s.height
+        val pix = IntArray(w * h)
+        s.getPixels(pix, 0, w, 0, 0, w, h)
+        val r = radius.coerceIn(1, 120)
+
+        stackBlur(pix, w, h, r)
+        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        out.setPixels(pix, 0, w, 0, 0, w, h)
+        if (out !== s) s.recycle()
         return out
     }
 
-    private fun stackBlur(src: Bitmap, radius: Int): Bitmap? {
-        val r = radius.coerceIn(1, 255)
-        val w = src.width
-        val h = src.height
-        if (w <= 0 || h <= 0) return null
-        val out = Bitmap.createBitmap(w, h, src.config ?: Bitmap.Config.ARGB_8888)
-        val pixels = IntArray(w * h)
-        src.getPixels(pixels, 0, w, 0, 0, w, h)
-        val div = (2 * r + 1)
-        val dv = IntArray(256 * div)
-        for (i in 0 until 256 * div) dv[i] = i / div
+    private fun stackBlur(pix: IntArray, w: Int, h: Int, radius: Int) {
+        val wm = w - 1
+        val hm = h - 1
+        val wh = w * h
+        val div = radius + radius + 1
+        val r = IntArray(wh)
+        val g = IntArray(wh)
+        val b = IntArray(wh)
+        val a = IntArray(wh)
+        var x: Int
+        var y: Int
+        var i: Int
+        var p: Int
+        var yp: Int
+        var yi: Int
+        var yw: Int
+        val vMin = IntArray(Math.max(w, h))
+        var divSum = div + 1 shr 1
+        divSum *= divSum
+        val dv = IntArray(256 * divSum)
+        i = 0
+        while (i < dv.size) {
+            dv[i] = i / divSum
+            i++
+        }
 
-        val rSum = IntArray(w)
-        val gSum = IntArray(w)
-        val bSum = IntArray(w)
+        yi = 0
+        yw = 0
+        i = 0
+        while (i < wh) {
+            p = pix[i]
+            r[i] = Color.red(p)
+            g[i] = Color.green(p)
+            b[i] = Color.blue(p)
+            a[i] = Color.alpha(p)
+            i++
+        }
 
-        // 水平方向
-        for (y in 0 until h) {
-            var sumR = 0; var sumG = 0; var sumB = 0
-            for (i in -r..r) {
-                val px = (i + w) % w
-                val p = pixels[y * w + px]
-                sumR += (p shr 16) and 0xff
-                sumG += (p shr 8) and 0xff
-                sumB += p and 0xff
+        var yp0 = 0
+        i = 0
+        while (i < h) {
+            var sumR = 0
+            var sumG = 0
+            var sumB = 0
+            var sumA = 0
+            var sumRIn = 0
+            var sumGIn = 0
+            var sumBIn = 0
+            var sumAIn = 0
+            var sumROut = 0
+            var sumGOut = 0
+            var sumBOut = 0
+            var sumAOut = 0
+            var rIn: Int
+            var gIn: Int
+            var bIn: Int
+            var aIn: Int
+            var rOut: Int
+            var gOut: Int
+            var bOut: Int
+            var aOut: Int
+            var m = -radius
+            while (m <= radius) {
+                p = pix[yi + Math.min(wm, Math.max(m, 0))]
+                sumR += Color.red(p)
+                sumG += Color.green(p)
+                sumB += Color.blue(p)
+                sumA += Color.alpha(p)
+                m++
             }
-            var yi = y * w
-            for (x in 0 until w) {
-                rSum[x] = sumR; gSum[x] = sumG; bSum[x] = sumB
-                val px1 = if (x + r + 1 >= w) x + r + 1 - w else x + r + 1
-                val px2 = if (x - r < 0) x - r + w else x - r
-                val pp = pixels[y * w + px1]
-                val p2 = pixels[y * w + px2]
-                sumR += ((pp shr 16) and 0xff) - ((p2 shr 16) and 0xff)
-                sumG += ((pp shr 8) and 0xff) - ((p2 shr 8) and 0xff)
-                sumB += (pp and 0xff) - (p2 and 0xff)
-                val pr = dv[rSum[x].coerceIn(0, 255 * div)]
-                val pg = dv[gSum[x].coerceIn(0, 255 * div)]
-                val pb = dv[bSum[x].coerceIn(0, 255 * div)]
-                pixels[yi] = (-16777216) or (pr shl 16) or (pg shl 8) or pb
+            x = 0
+            while (x < w) {
+                r[yi] = dv[sumR]
+                g[yi] = dv[sumG]
+                b[yi] = dv[sumB]
+                a[yi] = dv[sumA]
+                if (yp0 == 0) {
+                    vMin[x] = Math.min(x + radius + 1, wm)
+                }
+                p = pix[yw + vMin[x]]
+                rOut = Color.red(p)
+                gOut = Color.green(p)
+                bOut = Color.blue(p)
+                aOut = Color.alpha(p)
+                p = pix[yw + Math.max(x - radius, 0)]
+                rIn = Color.red(p)
+                gIn = Color.green(p)
+                bIn = Color.blue(p)
+                aIn = Color.alpha(p)
+                sumR += rIn - rOut
+                sumG += gIn - gOut
+                sumB += bIn - bOut
+                sumA += aIn - aOut
+                sumROut += rOut
+                sumGOut += gOut
+                sumBOut += bOut
+                sumAOut += aOut
+                sumRIn += rIn
+                sumGIn += gIn
+                sumBIn += bIn
+                sumAIn += aIn
                 yi++
+                x++
             }
+            yw += w
+            yp0++
         }
 
-        // 垂直方向
-        for (x in 0 until w) {
-            var sumR = 0; var sumG = 0; var sumB = 0
-            for (i in -r..r) {
-                val py = (i + h) % h
-                val p = pixels[py * w + x]
-                sumR += (p shr 16) and 0xff
-                sumG += (p shr 8) and 0xff
-                sumB += p and 0xff
+        yi = 0
+        yw = 0
+        i = 0
+        while (i < w) {
+            var sumR = 0
+            var sumG = 0
+            var sumB = 0
+            var sumA = 0
+            var yp1 = -radius * w
+            y = 0
+            while (y <= radius) {
+                yi = Math.max(0, yp1) + i
+                sumR += r[yi]
+                sumG += g[yi]
+                sumB += b[yi]
+                sumA += a[yi]
+                yp1 += w
+                y++
             }
-            var yi = 0
-            for (y in 0 until h) {
-                rSum[x] = sumR; gSum[x] = sumG; bSum[x] = sumB
-                val py1 = if (y + r + 1 >= h) y + r + 1 - h else y + r + 1
-                val py2 = if (y - r < 0) y - r + h else y - r
-                val pp = pixels[py1 * w + x]
-                val p2 = pixels[py2 * w + x]
-                sumR += ((pp shr 16) and 0xff) - ((p2 shr 16) and 0xff)
-                sumG += ((pp shr 8) and 0xff) - ((p2 shr 8) and 0xff)
-                sumB += (pp and 0xff) - (p2 and 0xff)
-                val pr = rSum[x].coerceIn(0, 255)
-                val pg = gSum[x].coerceIn(0, 255)
-                val pb = bSum[x].coerceIn(0, 255)
-                pixels[yi + x] = (-16777216) or (pr shl 16) or (pg shl 8) or pb
-                yi += w
+            y = 0
+            while (y < h) {
+                pix[yw + i] = Color.argb(dv[sumA], dv[sumR], dv[sumG], dv[sumB])
+                if (x == 0) {
+                    vMin[y] = Math.min(y + radius + 1, hm) * w + i
+                }
+                p = yw + vMin[y]
+                sumR -= r[p]
+                sumG -= g[p]
+                sumB -= b[p]
+                sumA -= a[p]
+                p = yw + Math.max(0, y - radius) * w + i
+                sumR += r[p]
+                sumG += g[p]
+                sumB += b[p]
+                sumA += a[p]
+                y++
             }
+            i++
         }
-
-        out.setPixels(pixels, 0, w, 0, 0, w, h)
-        return out
     }
 }
