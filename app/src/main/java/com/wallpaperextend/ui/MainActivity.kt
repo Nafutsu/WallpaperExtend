@@ -28,7 +28,7 @@ class MainActivity : AppCompatActivity() {
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
-    // 可调参数（feather 默认加大，过渡更自然）
+    // 可调参数
     private var blurRadius = 30
     private var extendRatio = 0.25f
     private var featherWidth = 120
@@ -70,6 +70,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setupUI() {
+        // 选图按钮
         binding.btnPick.setOnClickListener {
             val intent = Intent(Intent.ACTION_PICK).apply {
                 type = "image/*"
@@ -78,6 +79,7 @@ class MainActivity : AppCompatActivity() {
             pickImage.launch(intent)
         }
 
+        // 下载/保存按钮
         binding.btnSave.setOnClickListener {
             if (processedBitmap == null) {
                 Toast.makeText(this, "请先选择并生成壁纸", Toast.LENGTH_SHORT).show()
@@ -100,7 +102,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 模糊半径
+        // 参数调节：模糊半径
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 blurRadius = progress.coerceAtLeast(1)
@@ -157,104 +159,103 @@ class MainActivity : AppCompatActivity() {
             if (binding.etTargetHeight.text.isNullOrBlank()) {
                 binding.etTargetHeight.hint = "默认 ${srcHeight}（=原高+延展）"
             }
-
             // 回收旧原图（新图替换）
             originalBitmap?.recycleSafe()
             originalBitmap = bmp
-
             // 原图预览用缩放副本，避免 UI 持超大 Bitmap
             binding.imgOriginal.setImageBitmap(bmp)
-
             binding.btnSave.isEnabled = false
             processImage()
         }
     }
 
+    /** 参数变化后重新处理（防抖） */
     private var reprocessJob: Job? = null
     private fun reprocess() {
         if (originalBitmap == null) return
         reprocessJob?.cancel()
         reprocessJob = lifecycleScope.launch {
-            delay(150) // 防抖
+            delay(150)
             processImage()
         }
     }
 
     private suspend fun processImage() {
-    val src = originalBitmap
-    if (src == null) {
-        Toast.makeText(this, "图片为空", Toast.LENGTH_SHORT).show()
-        return
-    }
+        val src = originalBitmap
+        if (src == null) {
+            Toast.makeText(this, "图片为空", Toast.LENGTH_SHORT).show()
+            return
+        }
+        if (src.isRecycled || src.width <= 0 || src.height <= 0) {
+            Toast.makeText(this, "图片不可用", Toast.LENGTH_SHORT).show()
+            return
+        }
 
-    if (src.isRecycled || src.width <= 0 || src.height <= 0) {
-        Toast.makeText(this, "图片不可用", Toast.LENGTH_SHORT).show()
-        return
-    }
+        binding.progress.visibility = View.VISIBLE
 
-    binding.progress.visibility = View.VISIBLE
+        val result = try {
+            withContext(Dispatchers.Default) {
+                val screenW = resources.displayMetrics.widthPixels
+                val screenH = resources.displayMetrics.heightPixels
+                val refH = if (targetHeight > 0) targetHeight else screenH
 
-    val result = try {
-        withContext(Dispatchers.Default) {
-            val screenW = resources.displayMetrics.widthPixels
-            val screenH = resources.displayMetrics.heightPixels
-            val refH = if (targetHeight > 0) targetHeight else screenH
+                // 防止大图 OOM：处理图最大宽度限制为屏幕宽度的 2 倍
+                val maxProcessW = screenW * 2
+                val working = if (src.width > maxProcessW) {
+                    val scale = maxProcessW.toFloat() / src.width
+                    val newW = maxProcessW
+                    val newH = (src.height * scale).toInt().coerceAtLeast(1)
+                    Bitmap.createScaledBitmap(src, newW, newH, true)
+                } else {
+                    src
+                }
 
-            val maxProcessW = screenW * 2
-            val working = if (src.width > maxProcessW) {
-                val scale = maxProcessW.toFloat() / src.width
-                val newW = maxProcessW
-                val newH = (src.height * scale).toInt().coerceAtLeast(1)
-                Bitmap.createScaledBitmap(src, newW, newH, true)
-            } else {
-                src
-            }
-
-            try {
-                WallpaperProcessor.process(
-                    src = working,
-                    targetW = screenW,
-                    targetH = refH,
-                    config = WallpaperProcessor.Config(
-                        blurRadius = blurRadius,
-                        extendRatio = extendRatio,
-                        featherWidth = featherWidth,
-                        topOnly = topOnly
+                try {
+                    WallpaperProcessor.process(
+                        src = working,
+                        targetW = screenW,
+                        targetH = refH,
+                        config = WallpaperProcessor.Config(
+                            blurRadius = blurRadius,
+                            extendRatio = extendRatio,
+                            featherWidth = featherWidth,
+                            topOnly = topOnly
+                        )
                     )
-                )
-            } finally {
-                if (working != src) {
-                    working.recycle()
+                } finally {
+                    if (working != src) {
+                        working.recycle()
+                    }
                 }
             }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
+                binding.progress.visibility = View.GONE
+            }
+            return
         }
-    } catch (e: Exception) {
-        e.printStackTrace()
-        withContext(Dispatchers.Main) {
-            Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
-            binding.progress.visibility = View.GONE
-        }
-        return
+
+        // ★ 关键修复：用正确的 binding ID 和变量名
+        binding.imgResult.setImageBitmap(result)
+        processedBitmap = result
+        binding.btnSave.isEnabled = true
+        binding.progress.visibility = View.GONE
     }
 
-    binding.preview.setImageBitmap(result)
-    resultBitmap = result
-    binding.progress.visibility = View.GONE
-}
-
     private fun checkPermissionAndSave() {
-        val needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
-        if (!needsPermission) {
+        // Android 13+ 不需要 WRITE_EXTERNAL_STORAGE；Android 12- 也不需要（用 MediaStore）
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             saveCurrent()
         } else {
-            // Android 9-：请求 WRITE_EXTERNAL_STORAGE
             requestPermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
 
     private fun saveCurrent() {
         val bmp = processedBitmap ?: return
-        // 禁用按钮防止重复点击（重复保存是大图 OOM/闪退常见原因）
+        // 禁用按钮防止重复点击
         binding.btnSave.isEnabled = false
         binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
@@ -285,18 +286,6 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-    }
-
-    private fun shareImage(path: String) {
-        val uri = androidx.core.content.FileProvider.getUriForFile(
-            this, "$packageName.fileprovider", java.io.File(path)
-        )
-        val share = Intent(Intent.ACTION_SEND).apply {
-            type = "image/png"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        startActivity(Intent.createChooser(share, "分享延展壁纸"))
     }
 
     override fun onDestroy() {
