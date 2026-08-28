@@ -1,5 +1,6 @@
 package com.wallpaperextend.processor
 
+import kotlin.math.roundToInt
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
