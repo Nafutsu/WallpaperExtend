@@ -5,107 +5,101 @@ import android.graphics.Canvas
 import android.graphics.Matrix
 import android.graphics.Paint
 import androidx.palette.graphics.Palette
-import kotlin.math.roundToInt
 
 object WallpaperProcessor {
 
-    // 绝对兼容的求最大值方法
-    private fun maxInt(a: Int, b: Int): Int = if (a > b) a else b
-    // 绝对兼容的求最小值方法
-    private fun minInt(a: Int, b: Int): Int = if (a < b) a else b
-
+    /**
+     * 对外唯一入口：生成 iOS 17 风格延展壁纸
+     */
     fun extendWallpaper(
         src: Bitmap,
-        extendRatio: Float,
-        blurRadius: Int,
-        featherWidth: Int
+        extendRatio: Float = 0.35f,
+        blurRadius: Int = 30,
+        featherWidth: Int = 120
     ): Bitmap {
         val w = src.width
         val h = src.height
-        val extendH = (h * extendRatio).roundToInt()
-        
-        // 使用自定义 maxInt 防止 Kotlin 版本兼容报错
-        val safeBlurRadius = maxInt(1, blurRadius)
-        val safeFeather = maxInt(2, featherRadius = featherWidth)
+        val extendH = (h * extendRatio).toInt().coerceAtLeast(0)
 
-        // 1. 采样顶部条带
-        val stripH = maxInt(6, h / 7)
-        val topStrip = Bitmap.createBitmap(src, 0, 0, w, stripH)
+        // 采样原图顶部条带
+        val stripH = (h / 7).coerceAtLeast(6)
+        val topStrip = Bitmap.createBitmap(src, 0, 0, w, stripH.coerceAtMost(h))
 
-        // 2. iOS 算法：顺时针旋转 180 度
+        // iOS 核心：顺时针旋转 180°
         val matrix = Matrix().apply { setRotate(180f) }
-        val rotatedStrip = Bitmap.createBitmap(topStrip, 0, 0, w, stripH, matrix, true)
+        val rotatedStrip = Bitmap.createBitmap(
+            topStrip, 0, 0, topStrip.width, topStrip.height, matrix, true
+        )
         topStrip.recycle()
 
-        // 3. 拉伸旋转后的条带
+        // 拉伸到延展区尺寸
         val stretched = Bitmap.createScaledBitmap(rotatedStrip, w, extendH, true)
         rotatedStrip.recycle()
 
-        // 4. 模糊处理
-        val blurredExtend = fastBoxBlur(s stretched, safeBlurRadius)
+        // 高斯模糊
+        val safeRadius = blurRadius.coerceIn(1, 100)
+        val blurredExtend = stackBlur(stretched, safeRadius)
+        stretched.recycle()
 
-        // 5. 采样主色作为底色（防白边）
-        val edgeColor = sampleTopEdgeColor(src)
+        // 采样顶部主色（防白边底色）
+        val edgeColor = sampleEdgeColor(src)
 
-        // 6. 组装最终画布
+        // 组装最终画布
         val targetH = extendH + h
         val result = Bitmap.createBitmap(w, targetH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(result)
         canvas.drawColor(edgeColor)
 
-        // 绘制延展区
-        val drawY = extendH
-        canvas.drawBitmap(blurredExtend, 0f, drawY.toFloat(), null)
+        // 绘制延展区（从 y=0 开始，因为原图在下方）
+        canvas.drawBitmap(blurredExtend, 0f, 0f, null)
 
-        // 7. iOS 渐变融合（接缝清晰，向上渐隐）
-        val paint = Paint().apply { isAntiAlias = true }
-        val step = maxInt(1, safeFeather / 10)
-        for (i in 0 until safeFeather step step) {
-            val alpha = (255f * (i.toFloat() / safeFeather)).roundToInt()
-            paint.color = edgeColor
-            paint.alpha = alpha
-            canvas.drawRect(0f, (drawY - safeFeather + i).toFloat(), w.toFloat(), (drawY - safeFeather + i + step).toFloat(), paint)
+        // iOS 渐变融合：从延展区底部向上做渐变，让接缝处自然过渡
+        val safeFeather = featherWidth.coerceAtLeast(2).coerceAtMost(extendH)
+        if (safeFeather > 0) {
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+            val steps = 20
+            val stepH = safeFeather.toFloat() / steps
+            for (i in 0 until steps) {
+                val alpha = (255f * (i.toFloat() / steps)).toInt()
+                paint.color = edgeColor
+                paint.alpha = alpha
+                val y = extendH - safeFeather + (i * stepH)
+                canvas.drawRect(0f, y, w.toFloat(), y + stepH + 1f, paint)
+            }
         }
 
-        // 8. 绘制原图（向下重叠 1px 防浮点缝隙）
-        canvas.drawBitmap(src, 0f, drawY.toFloat() + 1f, null)
+        // 绘制原图（底部对齐，向下重叠 1px 防浮点缝隙）
+        val drawY = extendH.toFloat()
+        val srcPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { isFilterBitmap = true }
+        canvas.drawBitmap(src, 0f, drawY + 1f, srcPaint)
 
-        // 9. 兜底补边（防极端白线）
-        val actualScaledH = drawY + h
-        if (actualScaledH < targetH) {
-            val bottomColor = sampleBottomEdgeColor(src)
-            paint.color = bottomColor
-            paint.alpha = 255
-            canvas.drawRect(0f, actualScaledH.toFloat(), w.toFloat(), targetH.toFloat(), paint)
+        // 兜底：如果还有露底，补齐
+        val bottomY = drawY + h
+        if (bottomY < targetH) {
+            val fillPaint = Paint().apply { color = edgeColor }
+            canvas.drawRect(0f, bottomY, w.toFloat(), targetH.toFloat(), fillPaint)
         }
 
         blurredExtend.recycle()
         return result
     }
 
-    // --- 辅助方法 ---
-
-    private fun sampleTopEdgeColor(bitmap: Bitmap): Int {
-        try {
-            val palette = Palette.from(bitmap).setRegion(0, 0, bitmap.width, maxInt(1, bitmap.height / 10)).generate()
-            return palette.dominantSwatch?.rgb ?: palette.vibrantSwatch?.rgb ?: 0xFF000000.toInt()
+    // ─── 采样边缘主色 ───
+    private fun sampleEdgeColor(bitmap: Bitmap): Int {
+        return try {
+            val h = (bitmap.height / 10).coerceAtLeast(1)
+            val slice = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, h)
+            val color = Palette.from(slice).generate()
+                .getDominantColor(0xFF222222.toInt())
+            slice.recycle()
+            color
         } catch (e: Exception) {
-            return 0xFF000000.toInt()
+            0xFF222222.toInt()
         }
     }
 
-    private fun sampleBottomEdgeColor(bitmap: Bitmap): Int {
-        try {
-            val regionH = maxInt(1, bitmap.height / 10)
-            val palette = Palette.from(bitmap).setRegion(0, bitmap.height - regionH, bitmap.width, bitmap.height).generate()
-            return palette.dominantSwatch?.rgb ?: 0xFF000000.toInt()
-        } catch (e: Exception) {
-            return 0xFF000000.toInt()
-        }
-    }
-
-    // 极速方框模糊算法 (兼容所有 Kotlin 版本)
-    private fun fastBoxBlur(src: Bitmap, radius: Int): Bitmap {
+    // ─── Stack Blur 算法 ───
+    private fun stackBlur(src: Bitmap, radius: Int): Bitmap {
         var r = radius
         if (r < 1) r = 1
         val w = src.width
@@ -128,10 +122,9 @@ object WallpaperProcessor {
             var rInSum = 0
             var gInSum = 0
             var bInSum = 0
-            var p = pixels[yw]
 
             for (i in -r..r) {
-                val temp = pixels[yw + minInt(w - 1, maxInt(0, i))]
+                val temp = pixels[yw + (w - 1).coerceAtMost(0.coerceAtLeast(i))]
                 rSum += (temp shr 16) and 0xFF
                 gSum += (temp shr 8) and 0xFF
                 bSum += temp and 0xFF
@@ -140,7 +133,7 @@ object WallpaperProcessor {
             for (x in 0 until w) {
                 pixels[yw + x] = (dv[rSum] shl 16) or (dv[gSum] shl 8) or dv[bSum]
 
-                val oldOut = pixels[yw + maxInt(0, x - r)]
+                val oldOut = pixels[yw + (0.coerceAtLeast(x - r))]
                 rOutSum -= (oldOut shr 16) and 0xFF
                 gOutSum -= (oldOut shr 8) and 0xFF
                 bOutSum -= oldOut and 0xFF
@@ -172,7 +165,7 @@ object WallpaperProcessor {
             var bInSum = 0
 
             for (i in -r..r) {
-                val temp = pixels[minInt(h - 1, maxInt(0, i)) * w + x]
+                val temp = pixels[(h - 1).coerceAtMost(0.coerceAtLeast(i)) * w + x]
                 rSum += (temp shr 16) and 0xFF
                 gSum += (temp shr 8) and 0xFF
                 bSum += temp and 0xFF
@@ -181,7 +174,7 @@ object WallpaperProcessor {
             for (y in 0 until h) {
                 pixels[y * w + x] = (dv[rSum] shl 16) or (dv[gSum] shl 8) or dv[bSum]
 
-                val oldOut = pixels[maxInt(0, y - r) * w + x]
+                val oldOut = pixels[(0.coerceAtLeast(y - r)) * w + x]
                 rOutSum -= (oldOut shr 16) and 0xFF
                 gOutSum -= (oldOut shr 8) and 0xFF
                 bOutSum -= oldOut and 0xFF
