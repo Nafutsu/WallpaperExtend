@@ -7,7 +7,6 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
-import android.graphics.RectF
 import android.graphics.Shader
 import kotlin.math.max
 import kotlin.math.min
@@ -20,16 +19,11 @@ object WallpaperProcessor {
     data class Config(
         val blurRadius: Int = 30,
         val extendRatio: Float = 0.25f,
-        val featherWidth: Int = 120,
+        val featherWidth: Int = 40,
         val topOnly: Boolean = true,
         val mode: Mode = Mode.LIGHT
     )
 
-    /**
-     * 只顶部延展：
-     * - 顶部 = 原图顶部条纵向拉伸 → 高斯模糊 → 顶部浅色调统一 → 提亮降饱和
-     * - 原图从 extendH 开始，下面完全不动
-     */
     fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
         val safe = ensureOpaque(src)
         val scaled = scaleToWidth(safe, targetW)
@@ -45,14 +39,13 @@ object WallpaperProcessor {
         val outH = extendH + srcH
         val out = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(out)
-        canvas.drawColor(backgroundBaseColor(config.mode))
+        canvas.drawColor(Color.WHITE)
 
         if (extendH > 0) {
-            drawTopExtensionPsLike(canvas, scaled, targetW, extendH, config)
-            drawFeather(canvas, targetW, extendH, config.featherWidth.coerceAtLeast(1))
+            drawTopExtension(canvas, scaled, targetW, extendH, config)
+            drawFeather(canvas, targetW, extendH, config.featherWidth.coerceIn(8, 80))
         }
 
-        // 原图，严格从 extendH 开始
         val drawX = ((targetW - srcW) / 2f).coerceAtLeast(0f)
         canvas.drawBitmap(scaled, drawX, extendH.toFloat(), null)
 
@@ -62,54 +55,41 @@ object WallpaperProcessor {
         return out
     }
 
-    /* ================= 顶部延展（PS 手感） ================= */
+    /* ================= 顶部延展 ================= */
 
-    private fun drawTopExtensionPsLike(
+    private fun drawTopExtension(
         canvas: Canvas, src: Bitmap, w: Int, extendH: Int, config: Config
     ) {
-        // 1. 取原图顶部一条（纵向延续背景）
+        // 取原图顶部一条
         val stripH = max(8, src.height / 40)
         val topStrip = Bitmap.createBitmap(src, 0, 0, src.width, min(stripH, src.height))
 
-        // 2. 纵向拉伸到延展区
+        // 纵向拉伸
         val stretched = Bitmap.createScaledBitmap(topStrip, w, extendH, true)
         topStrip.recycle()
 
-        // 3. 高斯模糊
+        // 高斯模糊
         val blurred = stackBlur(stretched, config.blurRadius.coerceIn(1, 120))
         stretched.recycle()
 
-        // 4. 画模糊底色
+        // 画模糊底色
         canvas.drawBitmap(blurred, 0f, 0f, null)
 
-        // 5. 向顶部浅色调轻微统一（不要强主色，不要纯色带）
+        // 轻色调统一：用半透明纯色覆盖，不用 SRC_ATOP
         val topAvg = sampleTopColor(src, ratio = 0.2f)
-        val dominant = extractDominantColor(src, preferLight = true)
-        val tone = lighten(topAvg, dominant, factor = 0.35f)
-
-        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_ATOP)
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = Color.argb(30, Color.red(topAvg), Color.green(topAvg), Color.blue(topAvg))
         }
-        canvas.drawColor(tone, PorterDuff.Mode.SRC_ATOP)
+        canvas.drawRect(0f, 0f, w.toFloat(), extendH.toFloat(), paint)
 
-        // 6. 整体轻微提亮、降对比，做出窗帘/光感
-        canvas.drawColor(Color.argb(18, 255, 255, 255), PorterDuff.Mode.SRC_ATOP)
-
-        // 7. 顶部往下的柔和渐变，避免任何硬边界/橙线
-        val gradPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f, 0f, 0f, extendH.toFloat(),
-                intArrayOf(Color.argb(40, 255, 255, 255), Color.TRANSPARENT),
-                null, Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, 0f, w.toFloat(), extendH.toFloat(), gradPaint)
-        gradPaint.shader = null
+        // 轻微提亮
+        paint.color = Color.argb(15, 255, 255, 255)
+        canvas.drawRect(0f, 0f, w.toFloat(), extendH.toFloat(), paint)
 
         blurred.recycle()
     }
 
-    /** 原图顶部边缘柔和羽化（只在交接的一条带） */
+    /** 羽化：只让原图顶边柔和过渡，不压暗 */
     private fun drawFeather(canvas: Canvas, w: Int, extendH: Int, featherWidth: Int) {
         val feather = featherWidth.coerceIn(0, extendH)
         val startY = (extendH - feather).toFloat()
@@ -166,12 +146,10 @@ object WallpaperProcessor {
             }
         }
         sample.recycle()
-
         val sorted = counts.entries.sortedByDescending { it.value }
         var r = 0; var g = 0; var b = 0; var total = 0
         for (i in 0 until min(3, sorted.size)) {
             val (color, count) = sorted[i]
-            // 若偏好浅色，给亮度高的更高权重
             val lum = 0.299f * Color.red(color) + 0.587f * Color.green(color) + 0.114f * Color.blue(color)
             val weight = count * (3 - i) * if (preferLight) (1 + lum / 255f) else 1f
             r += (Color.red(color) * weight).roundToInt()
@@ -217,7 +195,7 @@ object WallpaperProcessor {
         return Bitmap.createScaledBitmap(src, targetW, targetH, true)
     }
 
-    /* ================= 栈模糊（模运算防越界） ================= */
+    /* ================= 栈模糊 ================= */
 
     private fun stackBlur(s: Bitmap, radius: Int): Bitmap {
         val r = radius.coerceIn(1, 255)
