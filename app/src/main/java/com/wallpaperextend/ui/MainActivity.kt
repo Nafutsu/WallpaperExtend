@@ -1,5 +1,7 @@
 package com.wallpaperextend.ui
 
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.ensureActive
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
