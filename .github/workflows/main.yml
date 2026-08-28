@@ -1,10 +1,9 @@
-name: Build APK
+name: Build Debug APK
 
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -15,22 +14,36 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Show files
-        run: ls -la
+      - name: Ensure wrapper jar exists
+        run: |
+          mkdir -p gradle/wrapper
+          if [ ! -f gradle/wrapper/gradle-wrapper.jar ]; then
+            curl -L -o gradle/wrapper/gradle-wrapper.jar \
+              https://github.com/gradle/gradle/raw/v8.5.0/gradle/wrapper/gradle-wrapper.jar
+          fi
 
-      - name: Grant execute permission for gradlew
-        run: chmod +x ./gradlew
+      - name: Create gradlew if missing
+        run: |
+          if [ ! -f gradlew ]; then
+            printf '%s\n' \
+              '#!/bin/sh' \
+              'exec java -classpath "$PWD/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"' \
+              > gradlew
+            chmod +x gradlew
+          else
+            chmod +x gradlew
+          fi
 
       - name: Build debug APK
-        run: ./gradlew :app:assembleDebug
+        run: ./gradlew assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: app-debug-apk
+          name: WallpaperExtend-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
