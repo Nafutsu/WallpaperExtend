@@ -8,15 +8,17 @@ import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.RenderEffect
 import android.graphics.Shader
-import android.graphics.HardwareBuffer
+import android.graphics.PixelFormat
+import android.hardware.HardwareBuffer
 import android.media.ImageReader
 import android.os.Build
-import android.util.Log
 import androidx.annotation.RequiresApi
+import kotlin.math.ceil
+import kotlin.math.max
+import kotlin.math.min
 
 @RequiresApi(Build.VERSION_CODES.S)
 object RenderEffectWallpaperProcessor {
-    private const val TAG = "RenderEffectWP"
 
     fun process(
         context: Context,
@@ -25,94 +27,157 @@ object RenderEffectWallpaperProcessor {
         targetH: Int,
         config: WallpaperConfig
     ): Bitmap {
-        val result = blurBitmapWithRenderEffect(src, config.blurRadius)
-        
-        val finalBmp = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        val canvas = android.graphics.Canvas(finalBmp)
-        
-        // 1. 画模糊底图
-        canvas.drawBitmap(result, 0f, 0f, null)
-        
-        // 2. 采样顶部颜色做叠加
-        val topColor = sampleTopEdgeColor(src)
-        val lightColor = lighten(topColor, 0.5f)
-        val overlay = Paint().apply {
-            color = Color.argb((config.overlayStrength * 255).toInt(), Color.red(lightColor), Color.green(lightColor), Color.blue(lightColor))
-        }
-        canvas.drawRect(0f, 0f, targetW.toFloat(), targetH.toFloat(), overlay)
-        
-        // 3. Smoothstep 渐变融合原图
-        val scaledH = (src.height * (targetW.toFloat() / src.width)).toInt().coerceAtLeast(1)
-        val scaledSrc = Bitmap.createScaledBitmap(src, targetW, scaledH, true)
+        val edgeColor = sampleTopEdgeColor(src)
+        val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(out)
+        canvas.drawColor(edgeColor)
+
+        // 原图缩放（铺满宽度，底部对齐）
+        val scaledW = targetW
+        val scaledH = ceil(src.height * targetW.toFloat() / src.width).toInt().coerceAtLeast(1)
+        val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
+
+        val maxExtend = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt()
+        val extendH = (targetH - scaledH).coerceAtLeast(0).coerceAtMost(maxExtend)
         val srcDrawY = (targetH - scaledH).toFloat()
-        
-        val feather = config.featherWidth.coerceAtMost(targetH / 2)
-        if (feather > 0) {
-            val fadePaint = Paint().apply {
-                shader = android.graphics.LinearGradient(
-                    0f, (srcDrawY + scaledH - feather).toFloat(),
-                    0f, (srcDrawY + scaledH).toFloat(),
-                    Color.argb(0, 255, 255, 255),
-                    Color.argb(255, 255, 255, 255),
-                    Shader.TileMode.CLAMP
-                )
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+
+        // 画原图
+        canvas.drawBitmap(scaled, 0f, srcDrawY,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+
+        // 顶部延展区
+        if (extendH > 0) {
+            val topSrcH = max(16, scaled.height / 4)
+            val topStrip = Bitmap.createBitmap(
+                scaled, 0, 0, scaled.width, min(topSrcH, scaled.height)
+            )
+            val stretched = Bitmap.createScaledBitmap(topStrip, targetW, extendH, true)
+            topStrip.recycle()
+
+            // ★ RenderEffect 模糊
+            val blurred = blurWithRenderEffect(stretched, config.blurRadius)
+            stretched.recycle()
+
+            // 色调蒙版
+            val topAvg = sampleTopEdgeColor(src)
+            val luminance = calculateLuminance(topAvg)
+            val overlayAlpha = (config.overlayStrength * 255).toInt()
+            val overlayColor = when {
+                luminance > 0.7 -> Color.argb(overlayAlpha, 255, 255, 255)
+                luminance < 0.3 -> Color.argb(overlayAlpha, 0, 0, 0)
+                else -> {
+                    val tone = lighten(topAvg, config.brightnessOffset + 0.1f)
+                    Color.argb(overlayAlpha, Color.red(tone), Color.green(tone), Color.blue(tone))
+                }
             }
+
+            val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = overlayColor }
+            canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
+            canvas.drawBitmap(blurred, 0f, 0f,
+                Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+            blurred.recycle()
+
+            // ★ 平滑渐变融合
+            val feather = config.featherWidth.coerceIn(50, extendH)
+            if (feather > 0) {
+                val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    shader = android.graphics.LinearGradient(
+                        0f, (extendH - feather).toFloat(),
+                        0f, extendH.toFloat(),
+                        Color.argb(255, 255, 255, 255),
+                        Color.argb(0, 255, 255, 255),
+                        Shader.TileMode.CLAMP
+                    )
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+                }
+                val layerId = canvas.saveLayer(
+                    0f, (extendH - feather).toFloat(),
+                    targetW.toFloat(), extendH.toFloat(),
+                    null
+                )
+                canvas.drawRect(
+                    0f, (extendH - feather).toFloat(),
+                    targetW.toFloat(), extendH.toFloat(),
+                    fadePaint
+                )
+                canvas.restoreToCount(layerId)
+            }
+        }
+
+        // 底部填充防露底
+        if (srcDrawY + scaledH < targetH) {
+            val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = edgeColor }
             canvas.drawRect(
-                0f, (srcDrawY + scaledH - feather).toFloat(),
-                targetW.toFloat(), (srcDrawY + scaledH).toFloat(),
-                fadePaint
+                0f, (srcDrawY + scaledH).coerceAtMost(targetH.toFloat()),
+                targetW.toFloat(), targetH.toFloat(), fill
             )
         }
-        canvas.drawBitmap(scaledSrc, 0f, srcDrawY, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-        scaledSrc.recycle()
-        result.recycle()
-        
-        return finalBmp
+
+        scaled.recycle()
+        return out
     }
 
-    private fun blurBitmapWithRenderEffect(src: Bitmap, radius: Float): Bitmap {
-        val w = src.width
-        val h = src.height
-        val hwBuffer = HardwareBuffer.create(w, h, HardwareBuffer.RGBA_8888, 1)
-        val imageReader = ImageReader.newInstance(w, h, android.graphics.PixelFormat.RGBA_8888, 1)
-        
-        val renderer = android.graphics.HardwareRenderer()
-        renderer.setSurface(imageReader.surface)
-        renderer.setLightSourceGeometry(w / 2f, 0f, 0f, 0f)
-        
-        val renderNode = android.graphics.RenderNode("blurNode")
-        renderNode.setPosition(0, 0, w, h)
-        val canvas = renderNode.beginRecording()
-        canvas.drawBitmap(src, 0f, 0f, null)
-        renderNode.endRecording()
-        
-        renderNode.setRenderEffect(
-            RenderEffect.createBlurEffect(radius.coerceIn(1f, 25f), radius.coerceIn(1f, 25f), Shader.TileMode.MIRROR)
+    // ★ 正确的离屏 RenderEffect 模糊
+    private fun blurWithRenderEffect(src: Bitmap, radius: Float): Bitmap {
+        val r = radius.coerceIn(1f, 25f)
+        val width = src.width
+        val height = src.height
+
+        val imageReader = ImageReader.newInstance(
+            width, height,
+            PixelFormat.RGBA_8888, 1,
+            HardwareBuffer.USAGE_GPU_SAMPLED_IMAGE or HardwareBuffer.USAGE_GPU_COLOR_OUTPUT
         )
-        
+
+        val renderNode = RenderNode("WallpaperBlur")
+        val renderer = HardwareRenderer()
+        renderer.setSurface(imageReader.surface)
         renderer.setContentRoot(renderNode)
-        renderer.render()
-        
-        val image = imageReader.acquireLatestImage()
-        val planes = image.planes
-        val buffer = planes[0].buffer
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        bmp.copyPixelsFromBuffer(buffer)
-        image.close()
-        
+        renderNode.setPosition(0, 0, width, height)
+
+        renderNode.setRenderEffect(
+            RenderEffect.createBlurEffect(r, r, Shader.TileMode.MIRROR)
+        )
+
+        val renderCanvas = renderNode.beginRecording()
+        renderCanvas.drawBitmap(src, 0f, 0f, null)
+        renderNode.endRecording()
+
+        renderer.createRenderRequest()
+            .setWaitForPresent(true)
+            .syncAndDraw()
+
+        val image = imageReader.acquireNextImage()
+            ?: throw RuntimeException("RenderEffect: no image")
+        val hwBuffer = image.hardwareBuffer
+            ?: throw RuntimeException("RenderEffect: no hardware buffer")
+
+        val hwBitmap = Bitmap.wrapHardwareBuffer(hwBuffer, null)
+            ?: throw RuntimeException("RenderEffect: bitmap creation failed")
+
+        val result = hwBitmap.copy(Bitmap.Config.ARGB_8888, false)
+
         hwBuffer.close()
-        renderer.destroy()
+        image.close()
         imageReader.close()
-        
-        return bmp
+        renderer.destroy()
+        renderNode.discardDisplayList()
+
+        return result ?: hwBitmap
     }
 
-    private fun sampleTopEdgeColor(src: Bitmap): Int {
-        val h = maxOf(1, (src.height * 0.1).toInt())
+    private fun calculateLuminance(color: Int): Float {
+        val r = Color.red(color) / 255f
+        val g = Color.green(color) / 255f
+        val b = Color.blue(color) / 255f
+        return 0.299f * r + 0.587f * g + 0.114f * b
+    }
+
+    private fun sampleTopEdgeColor(src: Bitmap, ratio: Float = 0.1f): Int {
+        val h = max(1, (src.height * ratio).toInt())
         var r = 0L; var g = 0L; var b = 0L; var count = 0L
-        val stepX = maxOf(1, src.width / 48)
-        val stepY = maxOf(1, h / 4)
+        val stepX = max(1, src.width / 48)
+        val stepY = max(1, h / 4)
         for (y in 0 until h step stepY) {
             for (x in 0 until src.width step stepX) {
                 val p = src.getPixel(x, y)
@@ -123,7 +188,7 @@ object RenderEffectWallpaperProcessor {
         return if (count == 0L) Color.BLACK else Color.rgb((r / count).toInt(), (g / count).toInt(), (b / count).toInt())
     }
 
-    private fun lighten(c: Int, factor: Float): Int {
+    private fun lighten(c: Int, factor: Float = 0.5f): Int {
         val f = factor.coerceIn(-1f, 1f)
         return if (f >= 0) {
             Color.rgb(
