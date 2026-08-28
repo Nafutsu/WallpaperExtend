@@ -1,7 +1,5 @@
 package com.wallpaperextend.ui
 
-import kotlin.coroutines.coroutineContext
-import kotlinx.coroutines.ensureActive
 import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
@@ -20,6 +18,7 @@ import com.wallpaperextend.util.ImageSaver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
@@ -29,10 +28,10 @@ class MainActivity : AppCompatActivity() {
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
-    // 可调参数
-    private var blurRadius = 30
+    // 可调参数（默认值已调为推荐区间）
+    private var blurRadius = 28
     private var extendRatio = 0.25f
-    private var featherWidth = 120
+    private var featherWidth = 40   // 默认 40，避免 120 产生厚雾带
     private var topOnly = true
     private var targetHeight = 0
 
@@ -102,7 +101,7 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // 参数调节：模糊半径
+        // 参数调节：模糊半径（0~60，默认 28）
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 blurRadius = progress.coerceAtLeast(1)
@@ -111,8 +110,9 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekBlur.progress = blurRadius
+        binding.seekBlur.max = 60
 
-        // 延展比例
+        // 延展比例（0~50%，默认 25%）
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 extendRatio = progress / 100f
@@ -121,16 +121,18 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekExtend.progress = (extendRatio * 100).toInt()
+        binding.seekExtend.max = 50
 
-        // 羽化宽度
+        // 羽化宽度（8~160，默认 40）
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                featherWidth = progress
+                featherWidth = progress.coerceIn(8, 160)
                 binding.tvFeather.text = "羽化宽度: $featherWidth"
                 if (fromUser) reprocess()
             }
         })
         binding.seekFeather.progress = featherWidth
+        binding.seekFeather.max = 160
     }
 
     private fun updateTargetHeight() {
@@ -153,6 +155,11 @@ class MainActivity : AppCompatActivity() {
             val bmp = withContext(Dispatchers.IO) {
                 ImageLoader.loadFromUri(this@MainActivity, uri)
             }
+            if (bmp.isRecycled || bmp.width <= 0 || bmp.height <= 0) {
+                Toast.makeText(this@MainActivity, "无法加载图片", Toast.LENGTH_SHORT).show()
+                binding.progress.visibility = View.GONE
+                return@launch
+            }
             // 更新原图尺寸显示
             srcWidth = bmp.width
             srcHeight = bmp.height
@@ -160,10 +167,10 @@ class MainActivity : AppCompatActivity() {
             if (binding.etTargetHeight.text.isNullOrBlank()) {
                 binding.etTargetHeight.hint = "默认 ${srcHeight}（=原高+延展）"
             }
-            // 回收旧原图（新图替换）
+            // 回收旧原图
             originalBitmap?.recycleSafe()
             originalBitmap = bmp
-            // 原图预览用缩放副本，避免 UI 持超大 Bitmap
+            // 原图预览（bmp 后续会被 originalBitmap 持有，不在此 recycle）
             binding.imgOriginal.setImageBitmap(bmp)
             binding.btnSave.isEnabled = false
             processImage()
@@ -173,34 +180,45 @@ class MainActivity : AppCompatActivity() {
     /** 参数变化后重新处理（防抖） */
     private var reprocessJob: Job? = null
     private fun reprocess() {
-        if (originalBitmap == null) return
+        val src = originalBitmap ?: return
+        if (src.isRecycled) return
         reprocessJob?.cancel()
         reprocessJob = lifecycleScope.launch {
             delay(150)
+            ensureActive() // 取消后不再执行
             processImage()
         }
     }
 
     private suspend fun processImage() {
         val src = originalBitmap
-        if (src == null) {
-            Toast.makeText(this, "图片为空", Toast.LENGTH_SHORT).show()
+        if (src == null || src.isRecycled) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "图片不可用", Toast.LENGTH_SHORT).show()
+            }
             return
         }
-        if (src.isRecycled || src.width <= 0 || src.height <= 0) {
-            Toast.makeText(this, "图片不可用", Toast.LENGTH_SHORT).show()
+        if (src.width <= 0 || src.height <= 0) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, "图片尺寸异常", Toast.LENGTH_SHORT).show()
+            }
             return
         }
-        binding.progress.visibility = View.VISIBLE
+
+        withContext(Dispatchers.Main) {
+            binding.progress.visibility = View.VISIBLE
+        }
+
         val result = try {
             withContext(Dispatchers.Default) {
                 ensureActive()
 
                 val screenW = resources.displayMetrics.widthPixels
                 val screenH = resources.displayMetrics.heightPixels
+                // refH 为最终输出高度：延展区 + 原图
                 val refH = if (targetHeight > 0) targetHeight else screenH
 
-                // 限制处理宽度，防止 OOM
+                // 限制处理宽度，防止 OOM（保持原图宽高比）
                 val maxProcessW = screenW * 2
                 val working = if (src.width > maxProcessW) {
                     val scale = maxProcessW.toFloat() / src.width
@@ -211,21 +229,25 @@ class MainActivity : AppCompatActivity() {
                     src
                 }
 
-                val extendH = (refH * extendRatio).toInt()
+                // 延展高度：按 refH 与 working 高度的比例计算
+                val extendH = ((refH - working.height).coerceAtLeast(0)).coerceAtMost(refH)
+
+                // 模糊半径不再强制压到 6，改用与图高相关的合理上限
+                val effectiveBlur = blurRadius.coerceIn(1, 60)
 
                 val output = if (topOnly) {
                     WallpaperExtend.extendTop(
                         src = working,
                         extendH = extendH,
                         featherH = featherWidth,
-                        blurRadius = blurRadius.coerceAtMost(6)
+                        blurRadius = effectiveBlur
                     )
                 } else {
                     WallpaperExtend.extendBottom(
                         src = working,
                         extendH = extendH,
                         featherH = featherWidth,
-                        blurRadius = blurRadius.coerceAtMost(6)
+                        blurRadius = effectiveBlur
                     )
                 }
 
@@ -243,14 +265,18 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        binding.imgResult.setImageBitmap(result)
-        processedBitmap = result
-        binding.btnSave.isEnabled = true
-        binding.progress.visibility = View.GONE
+        withContext(Dispatchers.Main) {
+            binding.imgResult.setImageBitmap(result)
+            // 回收上一帧处理结果，再保存新结果
+            processedBitmap?.recycleSafe()
+            processedBitmap = result
+            binding.btnSave.isEnabled = true
+            binding.progress.visibility = View.GONE
+        }
     }
 
     private fun checkPermissionAndSave() {
-        // Android 13+ 不需要 WRITE_EXTERNAL_STORAGE；Android 12- 也不需要（用 MediaStore）
+        // Android 10+ 用 MediaStore，不需要 WRITE_EXTERNAL_STORAGE
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             saveCurrent()
         } else {
@@ -260,7 +286,6 @@ class MainActivity : AppCompatActivity() {
 
     private fun saveCurrent() {
         val bmp = processedBitmap ?: return
-        // 禁用按钮防止重复点击
         binding.btnSave.isEnabled = false
         binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
