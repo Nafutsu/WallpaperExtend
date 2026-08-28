@@ -163,10 +163,12 @@ object WallpaperProcessor {
             } else {
                 intArrayOf(0xFFFFFFFF, 0x00FFFFFF)
             }
-            val shader = LinearGradient(
-                0f, featherTop.toFloat(), 0f, featherBottom.toFloat(),
-                colors, null, Shader.TileMode.CLAMP
-            )
+            val colors = if (edge == EDGE_TOP) {
+                intArrayOf(0x00FFFFFF.toInt(), 0xFFFFFFFF.toInt())
+            } else {
+                intArrayOf(0xFFFFFFFF.toInt(), 0x00FFFFFF.toInt())
+         }
+            
             // 用 ComposeShader：模糊图 × 渐变alpha
             val bitmapShader = android.graphics.BitmapShader(
                 scaledBlur, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP
