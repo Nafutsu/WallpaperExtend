@@ -20,6 +20,7 @@ import androidx.annotation.RequiresApi
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
+import android.graphics.LinearGradient
 
 @RequiresApi(Build.VERSION_CODES.S)
 object RenderEffectWallpaperProcessor {
