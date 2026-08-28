@@ -181,32 +181,66 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun processImage() {
-        val src = originalBitmap ?: return
-        binding.progress.visibility = View.VISIBLE
-        val result = withContext(Dispatchers.Default) {
-            val screenW = resources.displayMetrics.widthPixels
-            // 参考高度：用目标高度或屏幕高度（仅参与自动计算，主体宽度始终按屏幕宽）
-            val refH = targetHeight.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
-            WallpaperProcessor.process(
-             src = src,
-             targetW = screenW,
-             targetH = refH,
-             config = WallpaperProcessor.Config(
-             blurRadius = blurRadius,
-             extendRatio = extendRatio,
-             featherWidth = featherWidth,
-             topOnly = topOnly
-           )
-         )
-        }
-        // 回收旧的 result
-        processedBitmap?.recycleSafe()
-        processedBitmap = result
-        // 结果预览
-        binding.imgResult.setImageBitmap(result)
-        binding.btnSave.isEnabled = true
-        binding.progress.visibility = View.GONE
+    val src = originalBitmap
+    if (src == null) {
+        Toast.makeText(this, "图片为空", Toast.LENGTH_SHORT).show()
+        return
     }
+
+    if (src.isRecycled || src.width <= 0 || src.height <= 0) {
+        Toast.makeText(this, "图片不可用", Toast.LENGTH_SHORT).show()
+        return
+    }
+
+    binding.progress.visibility = View.VISIBLE
+
+    val result = try {
+        withContext(Dispatchers.Default) {
+            val screenW = resources.displayMetrics.widthPixels
+            val screenH = resources.displayMetrics.heightPixels
+            val refH = if (targetHeight > 0) targetHeight else screenH
+
+            val maxProcessW = screenW * 2
+            val working = if (src.width > maxProcessW) {
+                val scale = maxProcessW.toFloat() / src.width
+                val newW = maxProcessW
+                val newH = (src.height * scale).toInt().coerceAtLeast(1)
+                Bitmap.createScaledBitmap(src, newW, newH, true)
+            } else {
+                src
+            }
+
+            try {
+                WallpaperProcessor.process(
+                    src = working,
+                    targetW = screenW,
+                    targetH = refH,
+                    config = WallpaperProcessor.Config(
+                        blurRadius = blurRadius,
+                        extendRatio = extendRatio,
+                        featherWidth = featherWidth,
+                        topOnly = topOnly
+                    )
+                )
+            } finally {
+                if (working != src) {
+                    working.recycle()
+                }
+            }
+        }
+    } catch (e: Exception) {
+        e.printStackTrace()
+        withContext(Dispatchers.Main) {
+            Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
+            binding.progress.visibility = View.GONE
+        }
+        return
+    }
+
+    binding.preview.setImageBitmap(result)
+    resultBitmap = result
+    binding.progress.visibility = View.GONE
+}
 
     private fun checkPermissionAndSave() {
         val needsPermission = Build.VERSION.SDK_INT < Build.VERSION_CODES.Q
