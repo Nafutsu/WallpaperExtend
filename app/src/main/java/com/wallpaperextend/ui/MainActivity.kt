@@ -12,6 +12,7 @@ import androidx.lifecycle.lifecycleScope
 import com.wallpaperextend.databinding.ActivityMainBinding
 import com.wallpaperextend.processor.WallpaperConfig
 import com.wallpaperextend.processor.WallpaperExtendEngine
+import com.wallpaperextend.util.MediaStoreSaver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
