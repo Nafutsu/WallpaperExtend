@@ -17,8 +17,11 @@ object WallpaperProcessor {
 
     data class Config(
         val blurRadius: Int = 28,
+        // 延展比例：仅作为"最大延展高度占比"上限使用，实际延展高度 = 屏幕高度 - 原图缩放后高度
+        // （即刚好填满原图未能覆盖的顶部留白），所以拖动此滑块基本不影响常规竖图的视觉效果。
         val extendRatio: Float = 0.25f,
         val featherWidth: Int = 40,
+        // topOnly 保留字段，iOS 风格恒为"仅顶部延展"，此值实际固定为 true
         val topOnly: Boolean = true,
         val mode: Mode = Mode.LIGHT
     )
@@ -30,22 +33,31 @@ object WallpaperProcessor {
         val canvas = Canvas(out)
         canvas.drawColor(if (config.mode == Mode.LIGHT) Color.WHITE else Color.BLACK)
 
-        val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt().coerceAtLeast(0)
-        val feather = config.featherWidth.coerceIn(8, 160)
-
         // 原图按目标宽度等比缩放，横向铺满，避免右边白竖条
         val scaledW = targetW
         val scaledH = (src.height * targetW.toFloat() / src.width).toInt().coerceAtLeast(1)
         val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
 
-        val srcDrawY = extendH
+        // ====== iOS 17 风格：原图底部对齐，延展高度 = 屏幕高度 - 原图高度 ======
+        // 即顶部留白部分全部用"采样 + 模糊 + 羽化"填充，原图严格贴合屏幕底部。
+        val extendH = (targetH - scaledH).coerceAtLeast(0)
+            .coerceAtMost((targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt())
+        val feather = config.featherWidth.coerceIn(8, 160)
 
-        if (config.topOnly && extendH > 0) {
+        // 原图绘制 Y：底部对齐（= 屏幕高度 - 原图高度）
+        val srcDrawY = targetH - scaledH
+
+        if (extendH > 0) {
             drawTopExtension(canvas, scaled, targetW, extendH, config.blurRadius, feather)
         }
 
-        // 原图直接画，x=0 宽=targetW，无白边
-        canvas.drawBitmap(scaled, 0f, srcDrawY.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        // 原图贴底部画，无白边
+        canvas.drawBitmap(
+            scaled,
+            0f,
+            srcDrawY.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
 
         if (scaled !== src) scaled.recycle()
         return out
@@ -59,21 +71,23 @@ object WallpaperProcessor {
         blurRadius: Int,
         feather: Int
     ) {
-        // 取原图顶部一条做纵向延续
-        val stripH = max(6, scaled.height / 35)
+        if (extendH <= 0) return
+
+        // 取原图顶部一片区域做纵向延续（加宽到约 1/7，纹理延续更连贯，避免细线断裂）
+        val stripH = max(6, scaled.height / 7)
         val topStrip = Bitmap.createBitmap(scaled, 0, 0, scaled.width, stripH)
 
-        // 强制宽=targetW，高=extendH，避免白竖条
+        // 拉伸到 targetW × extendH，作为延展区的模糊底色
         val continuous = Bitmap.createScaledBitmap(topStrip, targetW, extendH, true)
         topStrip.recycle()
 
         val soft = stackBlur(continuous, blurRadius.coerceIn(0, 80))
         if (soft !== continuous) continuous.recycle()
 
-        // 画模糊底色
+        // 画模糊底色（顶部对齐，y = 0）
         canvas.drawBitmap(soft, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
 
-        // 轻色调统一（半透明覆盖，不用 SRC_ATOP）
+        // 轻色调统一（采样原图顶部边缘主色，半透明覆盖融合）
         val topAvg = sampleTopEdgeColor(scaled, ratio = 0.18f)
         val tone = lighten(topAvg, factor = 0.55f)
         val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -87,11 +101,10 @@ object WallpaperProcessor {
         }
         canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), lift)
 
-        // 接缝渐变融合：延展区底部用 DST_OUT 淡出，让原图透上来
+        // 接缝渐变融合：延展区底部用 DST_OUT 淡出，让下方清晰原图自然透上来
         val layerId = canvas.saveLayer(0f, 0f, targetW.toFloat(), extendH.toFloat(), null)
         val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-            // 用 3 参 Int 颜色 + FloatArray? positions，显式避免 Long 重载歧义
             shader = LinearGradient(
                 0f,
                 (extendH - feather).toFloat(),
@@ -114,7 +127,10 @@ object WallpaperProcessor {
                 (extendH - feather).toFloat(),
                 0f,
                 (extendH + feather.coerceAtMost(scaled.height)).toFloat(),
-                intArrayOf(Color.argb(0, 255, 255, 255), Color.argb(12, Color.red(tone), Color.green(tone), Color.blue(tone))),
+                intArrayOf(
+                    Color.argb(0, 255, 255, 255),
+                    Color.argb(12, Color.red(tone), Color.green(tone), Color.blue(tone))
+                ),
                 floatArrayOf(0f, 1f),
                 Shader.TileMode.CLAMP
             )
