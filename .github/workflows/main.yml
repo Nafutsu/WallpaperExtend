@@ -19,12 +19,19 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Verify Gradle wrapper
+      - name: Download correct Gradle wrapper jar
         run: |
-          ls -la
-          ls -la gradle/wrapper
-          cat gradle/wrapper/gradle-wrapper.properties
-          chmod +x ./gradlew
+          rm -f gradle/wrapper/gradle-wrapper.jar
+          curl -L -o gradle/wrapper/gradle-wrapper.jar \
+            https://services.gradle.org/distributions/gradle-8.2-wrapper.jar
+
+      - name: Create gradlew
+        run: |
+          cat > gradlew << 'EOF'
+          #!/bin/sh
+          exec java -classpath "$PWD/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
+          EOF
+          chmod +x gradlew
 
       - name: Build debug APK
         run: ./gradlew :app:assembleDebug
