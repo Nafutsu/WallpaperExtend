@@ -1,10 +1,9 @@
 package com.wallpaperextend.ui
 
-import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
-import android.view.View
 import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -13,13 +12,12 @@ import androidx.lifecycle.lifecycleScope
 import com.wallpaperextend.databinding.ActivityMainBinding
 import com.wallpaperextend.processor.WallpaperConfig
 import com.wallpaperextend.processor.WallpaperExtendEngine
-import com.wallpaperextend.util.ImageLoader
-import com.wallpaperextend.util.ImageSaver
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.InputStream
 
 class MainActivity : AppCompatActivity() {
 
@@ -28,8 +26,8 @@ class MainActivity : AppCompatActivity() {
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
-    // ★ 参数（与 XML 默认值对齐）
-    private var blurRadius = 20
+    // 参数（默认值与 XML 一致）
+    private var blurRadius = 20f
     private var extendRatio = 0.37f
     private var featherWidth = 150
     private var saturationBoost = 1.1f
@@ -38,13 +36,10 @@ class MainActivity : AppCompatActivity() {
     private var targetHeight = 0
 
     private val pickImageLauncher = registerForActivityResult(
-        ActivityResultContracts.StartActivityForResult()
-    ) { result ->
-        if (result.resultCode == RESULT_OK && result.data != null) {
-            val uri = result.data!!.data ?: return@registerForActivityResult
-            loadAndProcess(uri)
-        }
-    }
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? -> uri?.let { loadImage(it) } }
+
+    private var reprocessJob: Job? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -53,65 +48,49 @@ class MainActivity : AppCompatActivity() {
 
         engine = WallpaperExtendEngine.create(this)
         setupUI()
-        handleSharedIntent()
     }
 
     private fun setupUI() {
         binding.btnPick.setOnClickListener {
-            val intent = Intent(Intent.ACTION_PICK).apply {
-                type = "image/*"
-                action = Intent.ACTION_GET_CONTENT
-            }
-            pickImageLauncher.launch(intent)
+            pickImageLauncher.launch("image/*")
         }
 
         binding.btnSave.setOnClickListener {
             if (processedBitmap == null) {
-                Toast.makeText(this, "请先选择并生成壁纸", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "请先生成延展壁纸", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
             }
-            saveCurrent()
+            saveImage()
         }
 
-        // topOnly 开关：iOS 风格固定仅顶部
-        binding.cbTopOnly.isEnabled = false
-        binding.cbTopOnly.isChecked = true
-
-        binding.etTargetHeight.setOnFocusChangeListener { _, hasFocus ->
-            if (!hasFocus) {
-                updateTargetHeight()
-                reprocess()
-            }
-        }
-
-        // ---- 模糊半径 ----
-        binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                blurRadius = progress.coerceAtLeast(1)
-                binding.tvBlur.text = "模糊半径: $blurRadius"
-                if (fromUser) reprocess()
-            }
-        })
-
-        // ---- 延展比例 ----
+        // 延展比例
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 extendRatio = (progress / 100f).coerceIn(0f, 0.6f)
-                binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
+                binding.tvExtend.text = "延展比例: ${progress}%"
                 if (fromUser) reprocess()
             }
         })
 
-        // ---- 羽化宽度 ----
+        // 模糊半径
+        binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                blurRadius = progress.toFloat().coerceAtLeast(1)
+                binding.tvBlur.text = "模糊半径: $progress"
+                if (fromUser) reprocess()
+            }
+        })
+
+        // 羽化宽度
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 featherWidth = progress.coerceAtLeast(8)
-                binding.tvFeather.text = "羽化宽度: $featherWidth"
+                binding.tvFeather.text = "羽化宽度: $progress"
                 if (fromUser) reprocess()
             }
         })
 
-        // ---- 饱和度 ----
+        // 饱和度
         binding.seekSaturation.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 saturationBoost = 0.5f + progress / 100f
@@ -120,7 +99,7 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // ---- 亮度 ----
+        // 亮度
         binding.seekBrightness.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 brightnessOffset = (progress - 50) / 250f
@@ -129,108 +108,95 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // ---- 蒙版强度 ----
+        // 蒙版强度
         binding.seekOverlay.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 overlayStrength = progress / 100f
-                binding.tvOverlay.text = "蒙版强度: ${(overlayStrength * 100).toInt()}%"
+                binding.tvOverlay.text = "蒙版强度: ${progress}%"
                 if (fromUser) reprocess()
             }
         })
-    }
 
-    private fun updateTargetHeight() {
-        val value = binding.etTargetHeight.text.toString().toIntOrNull()
-        targetHeight = if (value != null && value > 0) value else 0
-    }
-
-    private fun handleSharedIntent() {
-        if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) {
-            val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM) as? Uri
-            uri?.let { loadAndProcess(it) }
+        binding.etTargetHeight.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                targetHeight = binding.etTargetHeight.text.toString().toIntOrNull() ?: 0
+                reprocess()
+            }
         }
     }
 
-    private fun loadAndProcess(uri: Uri) {
-        binding.progress.visibility = View.VISIBLE
-        lifecycleScope.launch {
-            val bmp = withContext(Dispatchers.IO) {
-                ImageLoader.loadFromUri(this@MainActivity, uri)
-            }
-            binding.tvSize.text = "原图尺寸: ${bmp.width} × ${bmp.height}"
-            if (binding.etTargetHeight.text.isNullOrBlank()) {
-                binding.etTargetHeight.hint = "默认 = 屏幕高度"
-            }
-            originalBitmap?.recycleSafe()
-            originalBitmap = bmp
-            binding.imgOriginal.setImageBitmap(bmp)
+    private fun loadImage(uri: Uri) {
+        try {
+            val inputStream: InputStream? = contentResolver.openInputStream(uri)
+            originalBitmap = BitmapFactory.decodeStream(inputStream)
+            inputStream?.close()
+            binding.imgOriginal.setImageBitmap(originalBitmap)
+            binding.tvSize.text = "原图尺寸: ${originalBitmap?.width} × ${originalBitmap?.height}"
+            processedBitmap = null
             binding.btnSave.isEnabled = false
-            processImage()
+            reprocess()
+        } catch (e: Exception) {
+            Toast.makeText(this, "加载图片失败: ${e.message}", Toast.LENGTH_SHORT).show()
         }
     }
 
-    private var reprocessJob: Job? = null
+    private fun currentConfig(): WallpaperConfig = WallpaperConfig(
+        blurRadius = blurRadius,
+        extendRatio = extendRatio,
+        featherWidth = featherWidth,
+        saturationBoost = saturationBoost,
+        brightnessOffset = brightnessOffset,
+        overlayStrength = overlayStrength
+    )
+
     private fun reprocess() {
-        if (originalBitmap == null) return
+        val src = originalBitmap ?: return
         reprocessJob?.cancel()
         reprocessJob = lifecycleScope.launch {
             delay(150)
-            processImage()
+            processImage(src)
         }
     }
 
-    private suspend fun processImage() {
-        val src = originalBitmap ?: return
-        binding.progress.visibility = View.VISIBLE
-        val result = withContext(Dispatchers.IO) {
+    private suspend fun processImage(src: Bitmap) {
+        binding.progress.visibility = android.view.View.VISIBLE
+        try {
             val dm = resources.displayMetrics
-            val screenW = dm.widthPixels
-            val refH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels
-            engine.process(
-                context = this@MainActivity,
-                src = src,
-                targetW = screenW,
-                targetH = refH,
-                config = WallpaperConfig(
-                    blurRadius = blurRadius.toFloat(),
-                    extendRatio = extendRatio,
-                    featherWidth = featherWidth,
-                    saturationBoost = saturationBoost,
-                    brightnessOffset = brightnessOffset,
-                    overlayStrength = overlayStrength
+            val result = withContext(Dispatchers.IO) {
+                engine.process(
+                    context = this@MainActivity,
+                    src = src,
+                    targetW = dm.widthPixels,
+                    targetH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels,
+                    config = currentConfig()
                 )
-            )
+            }
+            processedBitmap?.recycle()
+            processedBitmap = result
+            binding.imgResult.setImageBitmap(result)
+            binding.btnSave.isEnabled = true
+        } catch (e: Exception) {
+            Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
+            e.printStackTrace()
+        } finally {
+            binding.progress.visibility = android.view.View.GONE
         }
-        processedBitmap?.recycleSafe()
-        processedBitmap = result
-        binding.imgResult.setImageBitmap(result)
-        binding.btnSave.isEnabled = true
-        binding.progress.visibility = View.GONE
     }
 
-    private fun saveCurrent() {
+    private fun saveImage() {
         val bmp = processedBitmap ?: return
-        binding.btnSave.isEnabled = false
-        binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
-            var errorMsg: String? = null
-            val ok = try {
-                withContext(Dispatchers.IO) {
-                    ImageSaver.saveToGallery(
-                        this@MainActivity, bmp,
-                        "WallpaperExtend_${System.currentTimeMillis()}.png"
-                    )
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    MediaStoreSaver.save(this@MainActivity, bmp, "WallpaperExtend_${System.currentTimeMillis()}.png")
+                }
+                if (uri != null) {
+                    Toast.makeText(this@MainActivity, "已保存到相册", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "保存失败", Toast.LENGTH_SHORT).show()
                 }
             } catch (e: Exception) {
-                e.printStackTrace()
-                errorMsg = e.message
-                false
-            }
-            withContext(Dispatchers.Main) {
-                binding.progress.visibility = View.GONE
-                binding.btnSave.isEnabled = true
-                if (ok) Toast.makeText(this@MainActivity, "保存成功", Toast.LENGTH_LONG).show()
-                else Toast.makeText(this@MainActivity, "保存失败：$errorMsg", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, "保存失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -238,14 +204,8 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         engine.release()
-        originalBitmap?.recycleSafe()
-        processedBitmap?.recycleSafe()
-    }
-
-    private fun Bitmap?.recycleSafe() {
-        if (this != null && !isRecycled) {
-            try { recycle() } catch (_: Exception) {}
-        }
+        originalBitmap?.recycle()
+        processedBitmap?.recycle()
     }
 
     abstract class SimpleSeekBar : SeekBar.OnSeekBarChangeListener {
