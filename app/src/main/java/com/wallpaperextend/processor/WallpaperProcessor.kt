@@ -48,7 +48,7 @@ object WallpaperProcessor {
             Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         )
 
-        // ★ 再画模糊遮罩层（覆盖原图顶部，产生融合）
+        // ★ 再画延展区（模糊层会覆盖原图顶部，产生融合）
         if (extendH > 0) {
             drawTopExtension(
                 canvas, scaled, src, targetW, extendH,
@@ -83,15 +83,22 @@ object WallpaperProcessor {
     ) {
         if (extendH <= 0) return
 
-        // 1. 直接取原图顶部区域（不做旋转，避免倒影）
-        val topH = min(scaled.height, extendH)
-        val topRegion = Bitmap.createBitmap(scaled, 0, 0, scaled.width, topH)
+        val stripH = max(8, scaled.height / 6)
+        val topStrip = Bitmap.createBitmap(scaled, 0, 0, scaled.width, stripH)
 
-        // 2. 模糊处理
-        val blurred = stackBlur(topRegion, blurRadius.coerceIn(0, 80))
-        if (blurred !== topRegion) topRegion.recycle()
+        val rotated = Bitmap.createBitmap(
+            topStrip, 0, 0, topStrip.width, topStrip.height,
+            Matrix().apply { setRotate(180f) }, true
+        )
+        topStrip.recycle()
 
-        // 3. 极淡色调底色（防白边）
+        val stretched = Bitmap.createScaledBitmap(rotated, targetW, extendH, true)
+        rotated.recycle()
+
+        val blurred = stackBlur(stretched, blurRadius.coerceIn(0, 80))
+        if (blurred !== stretched) stretched.recycle()
+
+        // 极淡色调底色
         val topAvg = sampleTopEdgeColor(src, ratio = 0.12f)
         val tone = lighten(topAvg, factor = 0.2f)
         val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -99,13 +106,10 @@ object WallpaperProcessor {
         }
         canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
 
-        // 4. 绘制模糊层到延展区
-        val bgRect = android.graphics.Rect(0, 0, targetW, extendH)
-        canvas.drawBitmap(blurred, null, bgRect, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-
-        // 5. 模糊遮罩向下延伸覆盖原图顶部（用户通过 featherWidth 调整覆盖范围）
-        val effectiveFeather = feather.coerceAtLeast(50).coerceAtMost(300)
-        val overlayBmp = Bitmap.createScaledBitmap(blurred, targetW, extendH + effectiveFeather, true)
+        // 模糊层向下延伸覆盖原图顶部
+        val effectiveFeather = feather.coerceAtLeast(50).coerceAtMost(200)
+        val overlayBottom = extendH + effectiveFeather
+        val overlayBmp = Bitmap.createScaledBitmap(blurred, targetW, overlayBottom, true)
         if (overlayBmp !== blurred) blurred.recycle()
 
         canvas.drawBitmap(
@@ -114,12 +118,12 @@ object WallpaperProcessor {
             Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         )
 
-        // 6. 渐变淡出：在覆盖原图的区域让模糊层逐渐消失，露出下方原图
+        // 渐变淡出：在覆盖原图的区域让模糊层逐渐消失
         val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
             shader = LinearGradient(
                 0f, extendH.toFloat(),
-                0f, (extendH + effectiveFeather).toFloat(),
+                0f, overlayBottom.toFloat(),
                 Color.TRANSPARENT,
                 Color.BLACK,
                 Shader.TileMode.CLAMP
@@ -128,11 +132,11 @@ object WallpaperProcessor {
 
         val layerId = canvas.saveLayer(
             0f, extendH.toFloat(),
-            targetW.toFloat(), (extendH + effectiveFeather).toFloat(), null
+            targetW.toFloat(), overlayBottom.toFloat(), null
         )
         canvas.drawRect(
             0f, extendH.toFloat(),
-            targetW.toFloat(), (extendH + effectiveFeather).toFloat(),
+            targetW.toFloat(), overlayBottom.toFloat(),
             fadePaint
         )
         canvas.restoreToCount(layerId)
