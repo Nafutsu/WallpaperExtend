@@ -188,17 +188,16 @@ class MainActivity : AppCompatActivity() {
             // 参考高度：用目标高度或屏幕高度（仅参与自动计算，主体宽度始终按屏幕宽）
             val refH = targetHeight.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
             WallpaperProcessor.process(
-                src = src,
-                targetW = screenW,
-                targetH = refH,
-                config = WallpaperProcessor.Config(
-                    blurRadius = blurRadius,
-                    extendRatio = extendRatio,
-                    featherWidth = featherWidth,
-                    topOnly = topOnly,
-                    targetHeightPx = targetHeight
-                )
-            )
+             src = src,
+             targetW = screenW,
+             targetH = refH,
+             config = WallpaperProcessor.Config(
+             blurRadius = blurRadius,
+             extendRatio = extendRatio,
+             featherWidth = featherWidth,
+             topOnly = topOnly
+           )
+         )
         }
         // 回收旧的 result
         processedBitmap?.recycleSafe()
