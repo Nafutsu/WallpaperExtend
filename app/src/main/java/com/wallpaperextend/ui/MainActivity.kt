@@ -22,24 +22,17 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var binding: ActivityMainBinding
-
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
-
-    // 可调参数（feather 默认加大，过渡更自然）
     private var blurRadius = 30
     private var extendRatio = 0.25f
     private var featherWidth = 120
     private var topOnly = true
     private var targetHeight = 0
-
-    // 原图真实尺寸（加载后填充）
     private var srcWidth = 0
     private var srcHeight = 0
 
-    // 选图回调
     private val pickImage = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -49,7 +42,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // 存储权限回调
     private val requestPermission = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
@@ -64,7 +56,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
         setupUI()
         handleSharedIntent()
     }
@@ -77,7 +68,6 @@ class MainActivity : AppCompatActivity() {
             }
             pickImage.launch(intent)
         }
-
         binding.btnSave.setOnClickListener {
             if (processedBitmap == null) {
                 Toast.makeText(this, "请先选择并生成壁纸", Toast.LENGTH_SHORT).show()
@@ -85,22 +75,16 @@ class MainActivity : AppCompatActivity() {
             }
             checkPermissionAndSave()
         }
-
-        // 仅顶部延展开关
         binding.cbTopOnly.setOnCheckedChangeListener { _, checked ->
             topOnly = checked
             reprocess()
         }
-
-        // 输出高度输入
         binding.etTargetHeight.setOnFocusChangeListener { _, hasFocus ->
             if (!hasFocus) {
                 updateTargetHeight()
                 reprocess()
             }
         }
-
-        // 模糊半径
         binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 blurRadius = progress.coerceAtLeast(1)
@@ -109,8 +93,6 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekBlur.progress = blurRadius
-
-        // 延展比例
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 extendRatio = progress / 100f
@@ -119,8 +101,6 @@ class MainActivity : AppCompatActivity() {
             }
         })
         binding.seekExtend.progress = (extendRatio * 100).toInt()
-
-        // 羽化宽度
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 featherWidth = progress
@@ -136,7 +116,6 @@ class MainActivity : AppCompatActivity() {
         targetHeight = if (value != null && value > 0) value else 0
     }
 
-    /** 处理来自"分享到本 App"的图片 */
     private fun handleSharedIntent() {
         if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) {
             val uri = intent.getParcelableExtra(Intent.EXTRA_STREAM) as? android.net.Uri
@@ -150,21 +129,15 @@ class MainActivity : AppCompatActivity() {
             val bmp = withContext(Dispatchers.IO) {
                 ImageLoader.loadFromUri(this@MainActivity, uri)
             }
-            // 更新原图尺寸显示
             srcWidth = bmp.width
             srcHeight = bmp.height
             binding.tvSize.text = "原图尺寸: ${srcWidth} × ${srcHeight}"
             if (binding.etTargetHeight.text.isNullOrBlank()) {
                 binding.etTargetHeight.hint = "默认 ${srcHeight}（=原高+延展）"
             }
-
-            // 回收旧原图（新图替换）
             originalBitmap?.recycleSafe()
             originalBitmap = bmp
-
-            // 原图预览用缩放副本，避免 UI 持超大 Bitmap
             binding.imgOriginal.setImageBitmap(bmp)
-
             binding.btnSave.isEnabled = false
             processImage()
         }
@@ -175,7 +148,7 @@ class MainActivity : AppCompatActivity() {
         if (originalBitmap == null) return
         reprocessJob?.cancel()
         reprocessJob = lifecycleScope.launch {
-            delay(150) // 防抖
+            delay(150)
             processImage()
         }
     }
@@ -185,7 +158,6 @@ class MainActivity : AppCompatActivity() {
         binding.progress.visibility = View.VISIBLE
         val result = withContext(Dispatchers.Default) {
             val screenW = resources.displayMetrics.widthPixels
-            // 参考高度：用目标高度或屏幕高度（仅参与自动计算，主体宽度始终按屏幕宽）
             val refH = targetHeight.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
             WallpaperProcessor.process(
                 src = src,
@@ -195,15 +167,12 @@ class MainActivity : AppCompatActivity() {
                     blurRadius = blurRadius,
                     extendRatio = extendRatio,
                     featherWidth = featherWidth,
-                    topOnly = topOnly,
-                    targetHeightPx = targetHeight
+                    topOnly = topOnly
                 )
             )
         }
-        // 回收旧的 result
         processedBitmap?.recycleSafe()
         processedBitmap = result
-        // 结果预览
         binding.imgResult.setImageBitmap(result)
         binding.btnSave.isEnabled = true
         binding.progress.visibility = View.GONE
@@ -214,14 +183,12 @@ class MainActivity : AppCompatActivity() {
         if (!needsPermission) {
             saveCurrent()
         } else {
-            // Android 9-：请求 WRITE_EXTERNAL_STORAGE
             requestPermission.launch(android.Manifest.permission.WRITE_EXTERNAL_STORAGE)
         }
     }
 
     private fun saveCurrent() {
         val bmp = processedBitmap ?: return
-        // 禁用按钮防止重复点击（重复保存是大图 OOM/闪退常见原因）
         binding.btnSave.isEnabled = false
         binding.progress.visibility = View.VISIBLE
         lifecycleScope.launch {
@@ -244,11 +211,7 @@ class MainActivity : AppCompatActivity() {
                 if (ok) {
                     Toast.makeText(this@MainActivity, "保存成功，已加入相册", Toast.LENGTH_LONG).show()
                 } else {
-                    Toast.makeText(
-                        this@MainActivity,
-                        "保存失败：$errorMsg",
-                        Toast.LENGTH_LONG
-                    ).show()
+                    Toast.makeText(this@MainActivity, "保存失败：$errorMsg", Toast.LENGTH_LONG).show()
                 }
             }
         }
@@ -276,14 +239,10 @@ class MainActivity : AppCompatActivity() {
 
     private fun Bitmap?.recycleSafe() {
         if (this != null && !isRecycled) {
-            try {
-                recycle()
-            } catch (_: Exception) {
-            }
+            try { recycle() } catch (_: Exception) {}
         }
     }
 
-    // 简单 SeekBar 监听基类
     abstract class SimpleSeekBar : SeekBar.OnSeekBarChangeListener {
         override fun onStartTrackingTouch(seekBar: SeekBar?) {}
         override fun onStopTrackingTouch(seekBar: SeekBar?) {}
