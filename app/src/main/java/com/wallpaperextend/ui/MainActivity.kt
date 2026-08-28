@@ -4,18 +4,16 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.annotation.RequiresApi
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.wallpaperextend.databinding.ActivityMainBinding
-import com.wallpaperextend.processor.RenderEffectWallpaperProcessor
 import com.wallpaperextend.processor.WallpaperConfig
+import com.wallpaperextend.processor.WallpaperExtendEngine
 import com.wallpaperextend.util.ImageLoader
 import com.wallpaperextend.util.ImageSaver
 import kotlinx.coroutines.Dispatchers
@@ -24,10 +22,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-@RequiresApi(Build.VERSION_CODES.S)
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private lateinit var engine: WallpaperExtendEngine
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
@@ -35,7 +33,6 @@ class MainActivity : AppCompatActivity() {
     private var extendRatio = 0.37f
     private var featherWidth = 200
     private var targetHeight = 0
-
     private var saturationBoost = 1.1f
     private var brightnessOffset = 0f
     private var overlayStrength = 0.08f
@@ -54,17 +51,14 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
+        engine = WallpaperExtendEngine.create(this)
         setupUI()
         handleSharedIntent()
     }
 
     private fun setupUI() {
         binding.btnPick.setOnClickListener {
-            val intent = Intent(Intent.ACTION_PICK).apply {
-                type = "image/*"
-                action = Intent.ACTION_GET_CONTENT
-            }
-            pickImageLauncher.launch(intent)
+            pickImageLauncher.launch(ImageLoader.createPickIntent())
         }
 
         binding.btnSave.setOnClickListener {
@@ -184,7 +178,7 @@ class MainActivity : AppCompatActivity() {
             val dm = resources.displayMetrics
             val screenW = dm.widthPixels
             val refH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels
-            RenderEffectWallpaperProcessor.process(
+            engine.process(   // ★ 走统一引擎，自动选 NPU / RenderEffect
                 context = this@MainActivity,
                 src = src,
                 targetW = screenW,
@@ -235,6 +229,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
+        engine.release()
         originalBitmap?.recycleSafe()
         processedBitmap?.recycleSafe()
     }
