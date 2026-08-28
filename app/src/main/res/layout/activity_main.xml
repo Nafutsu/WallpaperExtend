@@ -12,7 +12,6 @@
         android:orientation="vertical"
         android:padding="16dp">
 
-        <!-- 标题 -->
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
@@ -26,27 +25,80 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="iOS 17 风格壁纸延展 · 支持下载保存到相册"
+            android:text="iOS 17 / ColorOS 16 风格壁纸延展 · 自然过渡 · 支持保存到相册"
             android:textSize="13sp"
             android:gravity="center"
             android:textColor="@color/text_secondary"
             android:layout_marginBottom="16dp" />
 
-        <!-- 原图预览 -->
+        <!-- 原图尺寸信息 + 输出高度设置 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@color/card"
+            android:padding="14dp"
+            android:layout_marginBottom="16dp">
+
+            <TextView
+                android:id="@+id/tvSize"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="原图尺寸: -"
+                android:textSize="14sp"
+                android:textColor="@color/text_primary" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="10dp"
+                android:gravity="center_vertical">
+
+                <TextView
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="输出高度(px):"
+                    android:textSize="14sp"
+                    android:textColor="@color/text_primary" />
+
+                <EditText
+                    android:id="@+id/etTargetHeight"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:layout_marginStart="8dp"
+                    android:inputType="number"
+                    android:hint="空=自动"
+                    android:textSize="14sp" />
+            </LinearLayout>
+
+            <CheckBox
+                android:id="@+id/cbTopOnly"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="仅顶部延展（底部保留原图，更接近 iOS 17）"
+                android:checked="true"
+                android:textSize="13sp"
+                android:textColor="@color/text_secondary"
+                android:layout_marginTop="8dp" />
+        </LinearLayout>
+
+        <!-- 原图预览（PhotoView 可缩放） -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="原图"
+            android:text="原图（可双指缩放）"
             android:textSize="15sp"
             android:textStyle="bold"
             android:textColor="@color/text_primary"
             android:layout_marginBottom="6dp" />
 
-        <ImageView
+        <com.github.chrisbanes.photoview.PhotoView
             android:id="@+id/imgOriginal"
             android:layout_width="match_parent"
-            android:layout_height="180dp"
-            android:scaleType="centerCrop"
+            android:layout_height="200dp"
+            android:scaleType="fitCenter"
             android:background="@color/card"
             android:contentDescription="原图预览" />
 
@@ -93,7 +145,7 @@
                 android:id="@+id/tvFeather"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="羽化宽度: 80"
+                android:text="羽化宽度: 120"
                 android:textSize="14sp"
                 android:textColor="@color/text_primary"
                 android:layout_marginTop="8dp" />
@@ -101,16 +153,15 @@
                 android:id="@+id/seekFeather"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:max="200"
-                android:progress="80" />
-
+                android:max="300"
+                android:progress="120" />
         </LinearLayout>
 
-        <!-- 结果预览 -->
+        <!-- 结果预览（PhotoView 可缩放） -->
         <TextView
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="延展结果"
+            android:text="延展结果（可双指缩放）"
             android:textSize="15sp"
             android:textStyle="bold"
             android:textColor="@color/text_primary"
@@ -118,13 +169,13 @@
 
         <FrameLayout
             android:layout_width="match_parent"
-            android:layout_height="300dp">
+            android:layout_height="320dp">
 
-            <ImageView
+            <com.github.chrisbanes.photoview.PhotoView
                 android:id="@+id/imgResult"
                 android:layout_width="match_parent"
                 android:layout_height="match_parent"
-                android:scaleType="centerCrop"
+                android:scaleType="fitCenter"
                 android:background="@color/card"
                 android:contentDescription="延展结果预览" />
 
@@ -134,7 +185,6 @@
                 android:layout_height="48dp"
                 android:layout_gravity="center"
                 android:visibility="gone" />
-
         </FrameLayout>
 
         <!-- 操作按钮 -->
