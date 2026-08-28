@@ -14,27 +14,15 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: 17
 
-      - name: Download correct Gradle wrapper jar
-        run: |
-          rm -f gradle/wrapper/gradle-wrapper.jar
-          curl -L -o gradle/wrapper/gradle-wrapper.jar \
-            https://services.gradle.org/distributions/gradle-8.2-wrapper.jar
-
-      - name: Create gradlew
-        run: |
-          cat > gradlew << 'EOF'
-          #!/bin/sh
-          exec java -classpath "$PWD/gradle/wrapper/gradle-wrapper.jar" org.gradle.wrapper.GradleWrapperMain "$@"
-          EOF
-          chmod +x gradlew
-
-      - name: Build debug APK
-        run: ./gradlew :app:assembleDebug
+      - name: Build with Gradle
+        uses: gradle/gradle-build-action@v3
+        with:
+          arguments: assembleDebug
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
