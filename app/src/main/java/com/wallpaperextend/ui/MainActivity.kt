@@ -30,11 +30,12 @@ class MainActivity : AppCompatActivity() {
     private var processedBitmap: Bitmap? = null
 
     // ====== 参数 ======
-    private var blurRadius = 30
-    private var extendRatio = 0.25f      // 仅作为"最大延展高度占比"上限，实际延展高度自动算
+    private var blurRadius = 32
+    private var extendRatio = 0.37f      // 最大延展高度占比上限；实际延展量 = 屏幕高 - 原图高
     private var featherWidth = 100
+    @Suppress("unused")
     private var topOnly = true           // iOS 风格恒为 true，保留字段
-    private var targetHeight = 0        // 0 = 自动取屏幕高度
+    private var targetHeight = 0        // 0 = 自动取屏幕高度（推荐，防白边 + 底部对齐准确）
 
     // 双指缩放：scale 越大，原图缩得越小，顶部延展区越高（模拟 iOS 捏合）
     private var userScale = 1.0f        // 1.0 = 铺满宽度；>1 表示用户缩小
@@ -68,10 +69,12 @@ class MainActivity : AppCompatActivity() {
             if (kotlin.math.abs(newScale - userScale) > 0.01f) {
                 userScale = newScale
                 // 把缩放量映射到 extendRatio，让延展高度随缩放变化
-                // scale 1.0 -> ratio ~0；scale 1.6 -> ratio ~0.3
-                extendRatio = ((userScale - minScale) / (maxScale - minScale) * 0.3f)
+                // scale 1.0 -> ratio ~0；scale 1.6 -> ratio ~0.37
+                extendRatio = ((userScale - minScale) / (maxScale - minScale) * 0.37f)
                     .coerceIn(0f, 0.6f)
                 binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
+                // 滑块与手势双向同步
+                binding.seekExtend.progress = (extendRatio * 100).toInt()
                 reprocess()
             }
             return true
@@ -84,7 +87,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(binding.root)
 
         scaleDetector = ScaleGestureDetector(this, onScaleListener)
-        // 把缩放手势挂到预览 ImageView 上（需布局里 imgResult 允许缩放，见下方说明）
+        // 把缩放手势挂到预览 ImageView 上（需布局里 imgResult 允许缩放）
         binding.imgResult.setOnTouchListener { _, event ->
             scaleDetector.onTouchEvent(event)
             true
@@ -110,7 +113,7 @@ class MainActivity : AppCompatActivity() {
             checkPermissionAndSave()
         }
 
-        // topOnly 开关：iOS 风格固定仅顶部，勾选框保留但恒为 true，禁用即可
+        // topOnly 开关：iOS 风格固定仅顶部，禁用即可
         binding.cbTopOnly.isEnabled = false
         binding.cbTopOnly.isChecked = true
 
@@ -133,8 +136,8 @@ class MainActivity : AppCompatActivity() {
         binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
                 // 手动拖动滑块时，同步更新 userScale，保持双向一致
-                extendRatio = progress / 100f
-                userScale = (extendRatio / 0.3f).coerceIn(0f, 1f) * (maxScale - minScale) + minScale
+                extendRatio = (progress / 100f).coerceIn(0f, 0.6f)
+                userScale = (extendRatio / 0.37f).coerceIn(0f, 1f) * (maxScale - minScale) + minScale
                 binding.tvExtend.text = "延展比例: ${(extendRatio * 100).toInt()}%"
                 if (fromUser) reprocess()
             }
@@ -143,7 +146,7 @@ class MainActivity : AppCompatActivity() {
 
         binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
             override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                featherWidth = progress
+                featherWidth = progress.coerceAtLeast(8)
                 binding.tvFeather.text = "羽化宽度: $featherWidth"
                 if (fromUser) reprocess()
             }
@@ -153,7 +156,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun updateTargetHeight() {
         val value = binding.etTargetHeight.text.toString().toIntOrNull()
-        // 0 或留空 = 自动取屏幕高度（推荐，底部对齐逻辑才准确）
+        // 0 或留空 = 自动取屏幕高度（推荐：底部对齐 + 防白边逻辑都依赖此值准确）
         targetHeight = if (value != null && value > 0) value else 0
     }
 
@@ -196,9 +199,11 @@ class MainActivity : AppCompatActivity() {
         val src = originalBitmap ?: return
         binding.progress.visibility = View.VISIBLE
         val result = withContext(Dispatchers.Default) {
-            val screenW = resources.displayMetrics.widthPixels
-            // targetHeight = 0 时自动取屏幕高度，确保"底部对齐 + 顶部延展"准确
-            val refH = targetHeight.takeIf { it > 0 } ?: resources.displayMetrics.heightPixels
+            val dm = resources.displayMetrics
+            val screenW = dm.widthPixels
+            // targetHeight = 0 时自动取屏幕**精确**高度（含状态栏/导航栏外的真实像素），
+            // 用 ceil 避免取整导致底部 1px 露底 → 白边 bug
+            val refH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels
             WallpaperProcessor.process(
                 src = src,
                 targetW = screenW,
