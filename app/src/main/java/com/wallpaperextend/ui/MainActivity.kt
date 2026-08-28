@@ -195,54 +195,61 @@ class MainActivity : AppCompatActivity() {
 
         val result = try {
             withContext(Dispatchers.Default) {
-                val screenW = resources.displayMetrics.widthPixels
-                val screenH = resources.displayMetrics.heightPixels
-                val refH = if (targetHeight > 0) targetHeight else screenH
+        val screenW = resources.displayMetrics.widthPixels
+        val screenH = resources.displayMetrics.heightPixels
+        val refH = if (targetHeight > 0) targetHeight else screenH
 
-                // 防止大图 OOM：处理图最大宽度限制为屏幕宽度的 2 倍
-                val maxProcessW = screenW * 2
-                val working = if (src.width > maxProcessW) {
-                    val scale = maxProcessW.toFloat() / src.width
-                    val newW = maxProcessW
-                    val newH = (src.height * scale).toInt().coerceAtLeast(1)
-                    Bitmap.createScaledBitmap(src, newW, newH, true)
-                } else {
-                    src
-                }
-
-                try {
-                    WallpaperProcessor.process(
-                        src = working,
-                        targetW = screenW,
-                        targetH = refH,
-                        config = WallpaperProcessor.Config(
-                            blurRadius = blurRadius,
-                            extendRatio = extendRatio,
-                            featherWidth = featherWidth,
-                            topOnly = topOnly
-                        )
-                    )
-                } finally {
-                    if (working != src) {
-                        working.recycle()
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            e.printStackTrace()
-            withContext(Dispatchers.Main) {
-                Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
-                binding.progress.visibility = View.GONE
-            }
-            return
+        // 防止大图 OOM：处理图最大宽度限制为屏幕宽度的 2 倍
+        val maxProcessW = screenW * 2
+        val working = if (src.width > maxProcessW) {
+            val scale = maxProcessW.toFloat() / src.width
+            val newW = maxProcessW
+            val newH = (src.height * scale).toInt().coerceAtLeast(1)
+            Bitmap.createScaledBitmap(src, newW, newH, true)
+        } else {
+            src
         }
 
-        // ★ 关键修复：用正确的 binding ID 和变量名
-        binding.imgResult.setImageBitmap(result)
-        processedBitmap = result
-        binding.btnSave.isEnabled = true
+        // topOnly → direction 映射
+        val direction = if (topOnly) {
+            WallpaperProcessor.ExtendDirection.TOP
+        } else {
+            WallpaperProcessor.ExtendDirection.BOTTOM
+        }
+
+        try {
+            WallpaperProcessor.process(
+                src = working,
+                targetW = screenW,
+                targetH = refH,
+                config = WallpaperProcessor.Config(
+                    blurRadius = blurRadius,
+                    extendRatio = extendRatio,
+                    featherWidth = featherWidth,
+                    direction = direction
+                )
+            )
+        } finally {
+            if (working != src) {
+                working.recycle()
+            }
+        }
+    }
+} catch (e: Exception) {
+    e.printStackTrace()
+    withContext(Dispatchers.Main) {
+        Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
         binding.progress.visibility = View.GONE
     }
+    return
+}
+
+// ★ 关键修复：用正确的 binding ID 和变量名
+binding.imgResult.setImageBitmap(result)
+processedBitmap = result
+binding.btnSave.isEnabled = true
+binding.progress.visibility = View.GONE
+
 
     private fun checkPermissionAndSave() {
         // Android 13+ 不需要 WRITE_EXTERNAL_STORAGE；Android 12- 也不需要（用 MediaStore）
