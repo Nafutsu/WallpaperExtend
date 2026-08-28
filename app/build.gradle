@@ -44,4 +44,5 @@ dependencies {
     implementation 'androidx.exifinterface:exifinterface:1.3.7'
     // 可缩放预览（双指缩放/拖动），解决原图与结果不好预览的问题
     implementation 'com.github.chrisbanes:photoview:2.3.0'
+    implementation'androidx.palette:palette:1.0.0'
 }
