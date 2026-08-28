@@ -9,11 +9,10 @@ android {
 
     defaultConfig {
         applicationId "com.wallpaperextend"
-        minSdk 21
+        minSdk 31
         targetSdk 34
         versionCode 1
         versionName "1.0"
-        // ★ 移除 RenderScript 配置
     }
 
     buildTypes {
@@ -51,7 +50,4 @@ dependencies {
     implementation 'androidx.palette:palette:1.0.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.github.chrisbanes:photoview:2.3.0'
-
-    // ★ GPUImage 替代 RenderScript
-    implementation 'jp.co.cyberagent.android:gpuimage:2.1.0'
 }
