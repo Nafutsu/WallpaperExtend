@@ -23,33 +23,63 @@ object WallpaperProcessor {
         val mode: Mode = Mode.LIGHT
     )
 
+    /**
+     * 只顶部延展（下方/底部绝不延展）。
+     *
+     * 布局（topOnly = true）：
+     *   [0 .. extendH]           → 顶部延展区（原图顶部条纵向拉伸 + 模糊 + 渐变融合）
+     *   [extendH .. extendH+srcH] → 原图本体，完整保留，下方绝不补白/模糊
+     *   outH = extendH + srcH    → 精确贴合，下方不留空（避免"看起来向下延展"）
+     *
+     * @param targetW 输出宽度（一般 = 屏幕宽，横向铺满）
+     * @param targetH 建议输出高度。若 topOnly=true，实际输出高度 = extendH + srcH（>= targetH）。
+     *                调用方可再自行裁剪/居中到屏幕，保证底部是原图或裁掉，而不是空白。
+     */
     fun process(src: Bitmap, targetW: Int, targetH: Int, config: Config = Config()): Bitmap {
         if (targetW <= 0 || targetH <= 0) return src
 
-        val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
-        canvas.drawColor(if (config.mode == Mode.LIGHT) Color.WHITE else Color.BLACK)
-
-        val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt().coerceAtLeast(0)
-        val feather = config.featherWidth.coerceIn(8, 160)
-
-        // 原图按目标宽度等比缩放，横向铺满，避免右边白竖条
+        // 1. 原图按目标宽度等比缩放，横向铺满，避免右边白竖条
         val scaledW = targetW
         val scaledH = (src.height * targetW.toFloat() / src.width).toInt().coerceAtLeast(1)
+
+        // 2. 顶部延展高度：基于"最终想让延展区占多少"计算
+        //    用 scaledH 作为基准，让延展比例与图片本身尺寸解耦，结果更稳定
+        val extendH = if (config.topOnly) {
+            (scaledH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt().coerceAtLeast(0)
+        } else {
+            0
+        }
+
+        // 3. 关键：输出高度 = 延展区 + 原图，下方不留任何空隙
+        //    （之前 bug：outH = targetH，当 extendH+scaledH < targetH 时下方露白底 = 看起来像向下延展）
+        val outH = extendH + scaledH
+
+        val out = Bitmap.createBitmap(targetW, outH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        // 底色只在延展区被绘制覆盖；下方是原图，不需要底色，用透明避免误以为有内容
+        canvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR)
+
         val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
+        val feather = config.featherWidth.coerceIn(8, 160)
 
-        val srcDrawY = extendH
-
-        if (config.topOnly && extendH > 0) {
+        // 4. 顶部延展（严格在 [0, extendH]，绝不画到原图以下）
+        if (extendH > 0) {
             drawTopExtension(canvas, scaled, targetW, extendH, config.blurRadius, feather)
         }
 
-        // 原图直接画，x=0 宽=targetW，无白边
-        canvas.drawBitmap(scaled, 0f, srcDrawY.toFloat(), Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        // 5. 原图本体：从 extendH 开始，完整绘制，下方不动
+        canvas.drawBitmap(
+            scaled,
+            0f,
+            extendH.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
 
         if (scaled !== src) scaled.recycle()
         return out
     }
+
+    /* ================= 顶部延展（iOS 风自然过渡） ================= */
 
     private fun drawTopExtension(
         canvas: Canvas,
@@ -59,76 +89,69 @@ object WallpaperProcessor {
         blurRadius: Int,
         feather: Int
     ) {
-        // 取原图顶部一条做纵向延续
-        val stripH = max(6, scaled.height / 35)
+        // --- 1. 取原图顶部一条，纵向拉伸到延展区（延续原图顶部背景纹理）---
+        val stripH = max(6, scaled.height / 40)
         val topStrip = Bitmap.createBitmap(scaled, 0, 0, scaled.width, stripH)
-
-        // 强制宽=targetW，高=extendH，避免白竖条
-        val continuous = Bitmap.createScaledBitmap(topStrip, targetW, extendH, true)
+        val stretched = Bitmap.createScaledBitmap(topStrip, targetW, extendH, true)
         topStrip.recycle()
 
-        val soft = stackBlur(continuous, blurRadius.coerceIn(0, 80))
-        if (soft !== continuous) continuous.recycle()
+        // --- 2. 高斯模糊 ---
+        val soft = stackBlur(stretched, blurRadius.coerceIn(0, 80))
+        if (soft !== stretched) stretched.recycle()
 
-        // 画模糊底色
-        canvas.drawBitmap(soft, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+        // --- 3. 用离屏层做"从原图顶边往上的渐变融合"，避免硬接缝 ---
+        //     层级（从下到上）：模糊底色 → 顶部浅色调统一 → 顶部提亮
+        val layer = Bitmap.createBitmap(targetW, extendH, Bitmap.Config.ARGB_8888)
+        val lc = Canvas(layer)
 
-        // 轻色调统一（半透明覆盖，不用 SRC_ATOP）
+        lc.drawBitmap(soft, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+
+        // 轻色调统一（半透明覆盖，不用 SRC_ATOP，避免脏灰边）
         val topAvg = sampleTopEdgeColor(scaled, ratio = 0.18f)
-        val tone = lighten(topAvg, factor = 0.55f)
-        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(26, Color.red(tone), Color.green(tone), Color.blue(tone))
-        }
-        canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
-
-        // 轻微提亮
-        val lift = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            color = Color.argb(18, 255, 255, 255)
-        }
-        canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), lift)
-
-        // 接缝渐变融合：延展区底部用 DST_OUT 淡出，让原图透上来
-        val layerId = canvas.saveLayer(0f, 0f, targetW.toFloat(), extendH.toFloat(), null)
-        val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-            // 用 3 参 Int 颜色 + FloatArray? positions，显式避免 Long 重载歧义
-            shader = LinearGradient(
-                0f,
-                (extendH - feather).toFloat(),
-                0f,
-                extendH.toFloat(),
-                intArrayOf(Color.BLACK, Color.TRANSPARENT),
-                floatArrayOf(0f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(0f, (extendH - feather).toFloat(), targetW.toFloat(), extendH.toFloat(), maskPaint)
-        maskPaint.shader = null
-        maskPaint.xfermode = null
-        canvas.restoreToCount(layerId)
-
-        // 原图顶部再叠一层柔和覆盖，消除硬边
-        val blend = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-            shader = LinearGradient(
-                0f,
-                (extendH - feather).toFloat(),
-                0f,
-                (extendH + feather.coerceAtMost(scaled.height)).toFloat(),
-                intArrayOf(Color.argb(0, 255, 255, 255), Color.argb(12, Color.red(tone), Color.green(tone), Color.blue(tone))),
-                floatArrayOf(0f, 1f),
-                Shader.TileMode.CLAMP
-            )
-        }
-        canvas.drawRect(
-            0f,
-            (extendH - feather).toFloat(),
-            targetW.toFloat(),
-            (extendH + feather.coerceAtMost(scaled.height)).toFloat(),
-            blend
+        val tone = lighten(topAvg, factor = 0.5f)
+        lc.drawRect(
+            0f, 0f, targetW.toFloat(), extendH.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = Color.argb(28, Color.red(tone), Color.green(tone), Color.blue(tone))
+            }
         )
 
+        // 轻微提亮（越靠近时钟区越亮，做出 iOS 那种"呼吸感"）
+        lc.drawRect(
+            0f, 0f, targetW.toFloat(), extendH.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                shader = LinearGradient(
+                    0f, 0f, 0f, extendH.toFloat(),
+                    intArrayOf(Color.argb(30, 255, 255, 255), Color.argb(0, 255, 255, 255)),
+                    floatArrayOf(0f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+        )
+
+        // --- 4. 接缝融合：延展区底部用 DST_OUT 渐隐，让原图边缘自然透上来 ---
+        //     这是消除硬线的关键 —— 渐变从"完全保留延展"到"完全透明"
+        val fadeH = feather.coerceIn(8, extendH)
+        lc.drawRect(
+            0f, (extendH - fadeH).toFloat(), targetW.toFloat(), extendH.toFloat(),
+            Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
+                shader = LinearGradient(
+                    0f, (extendH - fadeH).toFloat(), 0f, extendH.toFloat(),
+                    intArrayOf(Color.TRANSPARENT, Color.BLACK),
+                    floatArrayOf(0f, 1f),
+                    Shader.TileMode.CLAMP
+                )
+            }
+        )
+
+        // --- 5. 把离屏层画到最终画布 ---
+        canvas.drawBitmap(layer, 0f, 0f, Paint(Paint.FILTER_BITMAP_FLAG or Paint.ANTI_ALIAS_FLAG))
+        layer.recycle()
         if (soft !== scaled) soft.recycle()
     }
+
+    /* ================= 取色 ================= */
 
     private fun sampleTopEdgeColor(src: Bitmap, ratio: Float = 0.15f): Int {
         val h = max(1, (src.height * ratio).toInt())
@@ -161,12 +184,33 @@ object WallpaperProcessor {
         if (radius <= 0) return b
         val w = b.width; val h = b.height
         if (w <= 0 || h <= 0) return b
-        val pixels = IntArray(w * h)
-        b.getPixels(pixels, 0, w, 0, 0, w, h)
-        stackBlurH(pixels, w, h, radius)
-        stackBlurV(pixels, w, h, radius)
-        val out = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        out.setPixels(pixels, 0, w, 0, 0, w, h)
+
+        // 超大图先缩小再模糊，避免 OOM + 索引溢出
+        val MAX_DIM = 1024
+        val work = if (max(w, h) > MAX_DIM) {
+            val scale = MAX_DIM.toFloat() / max(w, h)
+            Bitmap.createScaledBitmap(
+                b,
+                (w * scale).roundToInt().coerceAtLeast(1),
+                (h * scale).roundToInt().coerceAtLeast(1),
+                true
+            )
+        } else {
+            b
+        }
+        val ww = work.width
+        val hh = work.height
+        val pixels = IntArray(ww * hh)
+        work.getPixels(pixels, 0, ww, 0, 0, ww, hh)
+
+        val rad = min(radius, (min(ww, hh) - 1) / 2).coerceAtLeast(1)
+        stackBlurH(pixels, ww, hh, rad)
+        stackBlurV(pixels, ww, hh, rad)
+
+        val out = Bitmap.createBitmap(ww, hh, Bitmap.Config.ARGB_8888)
+        out.setPixels(pixels, 0, ww, 0, 0, ww, hh)
+
+        if (work !== b) work.recycle()
         return out
     }
 
