@@ -50,4 +50,30 @@ dependencies {
     implementation 'androidx.palette:palette:1.0.0'
     implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3'
     implementation 'com.github.chrisbanes:photoview:2.3.0'
+
+    // ★ 端侧 AI 推理引擎（NPU / GPU / CPU 自动选择）
+    implementation 'com.microsoft.onnxruntime:onnxruntime-android:1.17.0'
 }
+
+// ★ 自动从 GitHub Release 下载 LaMa ONNX 模型到 assets/models/
+task downloadModel {
+    doLast {
+        def modelDir = new File("${project.projectDir}/src/main/assets/models")
+        modelDir.mkdirs()
+        def modelFile = new File(modelDir, "image_extension_lama.onnx")
+
+        if (!modelFile.exists()) {
+            println "⬇️ Downloading LaMa ONNX model..."
+            ant.get(
+                src: 'https://github.com/Nafutsu/WallpaperExtend/releases/download/v1.0.0/lama_fp32.onnx',
+                dest: modelFile,
+                verbose: true
+            )
+            println "✅ Model downloaded: ${modelFile.absolutePath}"
+        } else {
+            println "✅ Model already exists, skip download."
+        }
+    }
+}
+
+preBuild.dependsOn downloadModel
