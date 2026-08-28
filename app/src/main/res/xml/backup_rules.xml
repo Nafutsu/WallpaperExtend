@@ -2,4 +2,3 @@
 <full-backup-content>
     <exclude domain="cache" />
 </full-backup-content>
-
