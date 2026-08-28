@@ -7,8 +7,8 @@ import com.wallpaperextend.processor.ai.ExtendStrategy
 import com.wallpaperextend.processor.ai.NpuExtendEngine
 
 /**
- * 统一延展引擎 —— 自动选择最优策略。
- * 优先级：NPU > RenderEffect
+ * 统一延展引擎：自动选择最优策略。
+ * 优先级：NPU (LaMa) > RenderEffect (GPU 降级)
  */
 class WallpaperExtendEngine private constructor(
     private val strategies: List<ExtendStrategy>
@@ -20,14 +20,16 @@ class WallpaperExtendEngine private constructor(
         fun create(context: Context): WallpaperExtendEngine {
             val list = mutableListOf<ExtendStrategy>()
 
-            val npu = NpuExtendEngine()
+            // NPU 优先（LaMa 延展模型）
+            val npu = NpuExtendEngine(context)
             if (npu.isAvailable()) {
                 npu.loadModels()
                 list.add(npu)
-                Log.d(TAG, "NPU strategy registered")
             }
 
+            // GPU 降级（RenderEffect，保证始终可用）
             list.add(RenderEffectWallpaperProcessor)
+
             Log.d(TAG, "Strategies: ${list.joinToString { it.name() }}")
             return WallpaperExtendEngine(list)
         }

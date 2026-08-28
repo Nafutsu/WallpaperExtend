@@ -18,22 +18,32 @@ import android.hardware.HardwareBuffer
 import android.media.ImageReader
 import android.os.Build
 import androidx.annotation.RequiresApi
-import com.wallpaperextend.processor.ai.ExtendStrategy
+import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
 
 /**
- * RenderEffect 方案（minSdk 31 可用，系统级 GPU 模糊）。
- * 实现 ExtendStrategy 接口，可被 WallpaperExtendEngine 统一调度。
+ * GPU 降级方案：用 RenderEffect 做模糊+拉伸+羽化的延展（minSdk 31 必可用）。
+ * 实现 ExtendStrategy 接口，供 WallpaperExtendEngine 统一调度。
  */
 @RequiresApi(Build.VERSION_CODES.S)
 object RenderEffectWallpaperProcessor : ExtendStrategy {
 
-    override fun isAvailable(): Boolean = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    override fun isAvailable(): Boolean = true
 
     override fun name(): String = "RenderEffect-GPU"
 
     override suspend fun extend(
+        context: Context,
+        src: Bitmap,
+        targetW: Int,
+        targetH: Int,
+        config: WallpaperConfig
+    ): Bitmap {
+        return processInternal(context, src, targetW, targetH, config)
+    }
+
+    fun process(
         context: Context,
         src: Bitmap,
         targetW: Int,
@@ -82,7 +92,7 @@ object RenderEffectWallpaperProcessor : ExtendStrategy {
         canvas.drawBitmap(blurred, 0f, 0f, null)
         blurred.recycle()
 
-        // 羽化融合
+        // 羽化：延展区底部渐变消失，和原图融合
         val feather = config.featherWidth.coerceIn(50, extendH)
         if (feather > 0) {
             val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -108,7 +118,7 @@ object RenderEffectWallpaperProcessor : ExtendStrategy {
             canvas.restoreToCount(layerId)
         }
 
-        // 原图从 extendH 开始
+        // 画原图（从 extendH 开始，紧接延展区）
         val srcScaledH = (targetW.toFloat() / src.width * src.height).toInt()
         canvas.drawBitmap(
             src, null,
@@ -119,6 +129,7 @@ object RenderEffectWallpaperProcessor : ExtendStrategy {
         return out
     }
 
+    // 系统级 RenderEffect 离屏模糊
     private fun blurWithRenderEffect(src: Bitmap, radius: Float): Bitmap {
         val r = radius.coerceIn(1f, 25f)
         val width = src.width
