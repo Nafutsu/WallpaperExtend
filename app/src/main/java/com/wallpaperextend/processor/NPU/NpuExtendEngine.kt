@@ -10,15 +10,18 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
-import com.wallpaperextend.processor.ExtendStrategy
-import com.wallpaperextend.WallpaperConfig
-import com.wallpaperextend.processor.utils.ImageProcessingUtils
+import com.wallpaperextend.processor.ImageProcessingUtils
+import com.wallpaperextend.processor.WallpaperConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.FloatBuffer
 
+/**
+ * NPU LaMa 神经网络延展引擎
+ * 实现 ExtendStrategy 接口（同包下无需 import）
+ */
 class NpuExtendEngine(
     private val context: Context
 ) : ExtendStrategy {
@@ -143,9 +146,9 @@ class NpuExtendEngine(
             inputBitmap.recycle()
             maskBitmap.recycle()
 
-            // ★ 裁剪并缩放延展区
+            // ★ 裁剪并缩放延展区（修复：除法重载歧义）
             val extendAspect = targetW.toFloat() / extendH.toFloat()
-            val aiCropH = (INPUT_SIZE / extendAspect).toInt().coerceAtLeast(1)
+            val aiCropH = (INPUT_SIZE.toFloat() / extendAspect).toInt().coerceAtLeast(1)
             val croppedAi = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, aiCropH)
             generated512.recycle()
 
@@ -161,7 +164,7 @@ class NpuExtendEngine(
             val feathered = ImageProcessingUtils.applyFeather(colorMatched, config.featherWidth)
             colorMatched.recycle()
 
-            // ★ 拼接
+            // ★ 拼接（修复：减法重载歧义）
             val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(finalBitmap)
             canvas.drawBitmap(feathered, 0f, 0f, null)
