@@ -67,7 +67,6 @@ class MainActivity : AppCompatActivity() {
         binding.btnPick.setOnClickListener {
             pickImageLauncher.launch("image/*")
         }
-
         binding.btnSave.setOnClickListener {
             val bmp = processedBitmap
             if (bmp == null) {
@@ -126,6 +125,39 @@ class MainActivity : AppCompatActivity() {
                 scheduleReprocess()
             }
         }
+
+        // ==================== 5.2 设置 iOS 风格默认参数 ====================
+        // 设置 iOS 风格默认参数（与 XML 初始值不同）
+        binding.seekExtend.progress = 40          // 40%
+        binding.seekBlur.progress = 15            // 半径 15
+        binding.seekFeather.progress = 180        // 羽化 180px
+        binding.seekSaturation.progress = 60      // 1.1x
+        binding.seekBrightness.progress = 52      // +0.08
+        binding.seekOverlay.progress = 10         // 10%
+        binding.cbTopOnly.isChecked = true
+
+        // 更新对应的 TextView（否则显示还是旧值）
+        binding.tvExtend.text = "延展比例: 40%"
+        binding.tvBlur.text = "模糊半径: 15"
+        binding.tvFeather.text = "羽化宽度: 180"
+        binding.tvSaturation.text = "饱和度: 1.1x"
+        binding.tvBrightness.text = "亮度: 0.08"
+        binding.tvOverlay.text = "蒙版强度: 10%"
+
+        // 同步成员变量
+        extendRatio = 0.40f
+        blurRadius = 15f
+        featherWidth = 180
+        saturationBoost = 1.1f
+        brightnessOffset = 0.08f
+        overlayStrength = 0.10f
+        // ==================================================================
+
+        // ==================== 5.1 绑定 cbTopOnly 复选框 ====================
+        binding.cbTopOnly.setOnCheckedChangeListener { _, _ ->
+            scheduleReprocess()
+        }
+        // ==================================================================
     }
 
     private fun loadImage(uri: Uri) {
@@ -145,14 +177,17 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ==================== 5.3 修改 currentConfig() 加入 topOnly ====================
     private fun currentConfig(): WallpaperConfig = WallpaperConfig(
         blurRadius = blurRadius,
         extendRatio = extendRatio,
         featherWidth = featherWidth,
         saturationBoost = saturationBoost,
         brightnessOffset = brightnessOffset,
-        overlayStrength = overlayStrength
+        overlayStrength = overlayStrength,
+        topOnly = binding.cbTopOnly.isChecked  // ← 新增
     )
+    // =============================================================================
 
     // ★ 修复：防抖 + 排队，拖动滑块不再疯狂 cancel → 不再抛 "was cancelled"
     private fun scheduleReprocess() {
