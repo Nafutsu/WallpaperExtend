@@ -10,7 +10,6 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
-import com.wallpaperextend.processor.ImageProcessingUtils
 import com.wallpaperextend.processor.WallpaperConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
@@ -19,8 +18,9 @@ import java.io.File
 import java.nio.FloatBuffer
 
 /**
- * NPU LaMa 神经网络延展引擎
- * 实现 ExtendStrategy 接口（同包下无需 import）
+ * NPU LaMa 神经网络延展引擎。
+ * 实现 ExtendStrategy 接口；同时对外提供 generateExtensionBlock()，
+ * 供 WallpaperProcessor 在 useNpu=true 时获取"纯延展区块"。
  */
 class NpuExtendEngine(
     private val context: Context
@@ -30,7 +30,7 @@ class NpuExtendEngine(
         private const val TAG = "NpuExtendEngine"
         private const val MODEL_ASSET = "models/image_extension_lama.onnx"
         private const val MODEL_FILE = "image_extension_lama.onnx"
-        private const val INPUT_SIZE = 512
+        const val INPUT_SIZE = 512   // ← 公开，供外部计算裁剪
     }
 
     private var session: OrtSession? = null
@@ -85,6 +85,9 @@ class NpuExtendEngine(
         }
     }
 
+    // ==================================================================
+    // ExtendStrategy 接口：返回完整拼接好的最终壁纸
+    // ==================================================================
     override suspend fun extend(
         context: Context,
         src: Bitmap,
@@ -98,95 +101,154 @@ class NpuExtendEngine(
                 ?: throw IllegalStateException("NPU model not loaded (isAvailable=${isAvailable()})")
 
             val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f))
-                .toInt()
-                .coerceAtLeast(8)
+                .toInt().coerceAtLeast(8)
 
-            // 原图适配目标宽度
-            val scaledH = (targetW.toFloat() / src.width * src.height)
-                .toInt()
-                .coerceAtLeast(1)
+            // 原图适配目标宽度（用于拼接）
+            val scaledH = (targetW.toFloat() / src.width * src.height).toInt().coerceAtLeast(1)
             val scaledSrc = Bitmap.createScaledBitmap(src, targetW, scaledH, true)
 
-            // ---- 构造 512x512 输入：原图贴底部，顶部为待延展区 ----
+            // 推理：得到 512x512 的生成结果
+            val generated512 = runInference(ortSession, src, targetW, targetH, extendH)
+
+            // 裁剪并缩放为延展区
+            val extendAspect = targetW.toFloat() / extendH.toFloat()
+            val aiCropH = (INPUT_SIZE.toFloat() / extendAspect).toInt().coerceAtLeast(1)
+            val croppedAi = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, aiCropH)
+            generated512.recycle()
+            val scaledGenerated = Bitmap.createScaledBitmap(croppedAi, targetW, extendH, true)
+            croppedAi.recycle()
+
+            // ★ 公共方法：颜色匹配 + 羽化 + 拼接
+            val finalBitmap = NPUImageProcessingUtils.composeExtendedWallpaper(
+                extendedRegion = scaledGenerated,
+                src = src,
+                targetW = targetW,
+                targetH = targetH,
+                extendH = extendH,
+                featherWidth = config.featherWidth
+            )
+            scaledSrc.recycle()
+            return@withContext finalBitmap
+        }
+    }
+
+    // ==================================================================
+    // ★ 新增：生成"纯延展区域"（无原图拼接），供 WallpaperProcessor 使用
+    // srcTopStrip = 原图顶部条带（作为推理条件）
+    // 返回 Bitmap 尺寸 = targetW x extendH，已做颜色匹配 + 羽化
+    // ==================================================================
+    suspend fun generateExtensionBlock(
+        context: Context,
+        srcTopStrip: Bitmap,
+        targetW: Int,
+        extendH: Int,
+        featherWidth: Int = 150
+    ): Bitmap = withContext(Dispatchers.Default) {
+        kotlinx.coroutines.withContext(NonCancellable) {
+            if (!isInitialized) loadModels()
+            val ortSession = session
+                ?: throw IllegalStateException("NPU model not loaded")
+
+            val stripH = srcTopStrip.height.coerceAtLeast(1)
+            // 构造 512x512 输入：把条带贴底部，顶部为待生成区
             val inputBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
-            val inputCanvas = Canvas(inputBitmap).apply { drawColor(Color.BLACK) }
-            val srcBottomH = (scaledH * INPUT_SIZE / targetW).coerceAtLeast(1)
-            val srcTop = INPUT_SIZE - srcBottomH
-            inputCanvas.drawBitmap(
+            Canvas(inputBitmap).apply { drawColor(Color.BLACK) }
+            val stripBottomH = (stripH * INPUT_SIZE / INPUT_SIZE).coerceAtLeast(1)
+            val srcTop = INPUT_SIZE - stripBottomH
+            Canvas(inputBitmap).apply {
+                drawBitmap(
+                    srcTopStrip,
+                    Rect(0, 0, srcTopStrip.width, srcTopStrip.height),
+                    Rect(0, srcTop, INPUT_SIZE, INPUT_SIZE),
+                    null
+                )
+            }
+
+            // mask：顶部 = 1
+            val maskBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ALPHA_8)
+            Canvas(maskBitmap).apply {
+                drawColor(Color.BLACK)
+                drawRect(
+                    0f, 0f, INPUT_SIZE.toFloat(), (INPUT_SIZE - stripBottomH).toFloat(),
+                    Paint().apply { color = Color.WHITE }
+                )
+            }
+
+            val imageTensor = bitmapToTensor(inputBitmap)
+            val maskTensor = maskToTensor(maskBitmap)
+            val outputs = ortSession.run(mapOf("image" to imageTensor, "mask" to maskTensor))
+            val resultTensor = outputs[0] as OnnxTensor
+            val generated512 = floatBufferToBitmap(resultTensor.floatBuffer, INPUT_SIZE, INPUT_SIZE)
+            imageTensor.close(); maskTensor.close(); resultTensor.close(); outputs.close()
+            inputBitmap.recycle(); maskBitmap.recycle()
+
+            // 裁剪 + 缩放成 targetW x extendH
+            val extendAspect = targetW.toFloat() / extendH.toFloat()
+            val aiCropH = (INPUT_SIZE.toFloat() / extendAspect).toInt().coerceAtLeast(1)
+            val cropped = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, aiCropH)
+            generated512.recycle()
+            val scaled = Bitmap.createScaledBitmap(cropped, targetW, extendH, true)
+            cropped.recycle()
+
+            // 颜色匹配 + 羽化（仅延展区，不拼接原图）
+            val topAvg = NPUImageProcessingUtils.sampleTopAverageColor(srcTopStrip, 0.12f)
+            val matched = NPUImageProcessingUtils.matchColorToTarget(scaled, topAvg)
+            scaled.recycle()
+            val feathered = NPUImageProcessingUtils.applyFeather(matched, featherWidth)
+            matched.recycle()
+            return@withContext feathered
+        }
+    }
+
+    // ==================================================================
+    // 推理核心（被 extend 与 generateExtensionBlock 共用）
+    // ==================================================================
+    private suspend fun runInference(
+        ortSession: OrtSession,
+        src: Bitmap,
+        targetW: Int,
+        targetH: Int,
+        extendH: Int
+    ): Bitmap = withContext(Dispatchers.Default) {
+        val scaledH = (targetW.toFloat() / src.width * src.height).toInt().coerceAtLeast(1)
+        val scaledSrc = Bitmap.createScaledBitmap(src, targetW, scaledH, true)
+
+        val inputBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
+        Canvas(inputBitmap).apply { drawColor(Color.BLACK) }
+        val srcBottomH = (scaledH * INPUT_SIZE / targetW).coerceAtLeast(1)
+        val srcTop = INPUT_SIZE - srcBottomH
+        Canvas(inputBitmap).apply {
+            drawBitmap(
                 scaledSrc,
                 Rect(0, 0, scaledSrc.width, scaledSrc.height),
                 Rect(0, srcTop, INPUT_SIZE, INPUT_SIZE),
                 null
             )
-
-            // ---- mask：顶部 extendH 区域 = 1（待生成），其余 = 0 ----
-            val maskBottomH = (extendH * INPUT_SIZE / targetH).coerceAtLeast(1)
-            val maskBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ALPHA_8)
-            Canvas(maskBitmap).apply {
-                drawColor(Color.BLACK)
-                drawRect(
-                    0f, 0f, INPUT_SIZE.toFloat(), maskBottomH.toFloat(),
-                    Paint().apply { color = Color.WHITE }
-                )
-            }
-
-            // ---- 推理 ----
-            val imageTensor = bitmapToTensor(inputBitmap)
-            val maskTensor = maskToTensor(maskBitmap)
-            val inputs = mapOf("image" to imageTensor, "mask" to maskTensor)
-            val outputs = ortSession.run(inputs)
-            val resultTensor = outputs[0] as OnnxTensor
-            val generated512 = floatBufferToBitmap(resultTensor.floatBuffer, INPUT_SIZE, INPUT_SIZE)
-
-            // 关闭 tensor
-            imageTensor.close()
-            maskTensor.close()
-            resultTensor.close()
-            outputs.close()
-            inputBitmap.recycle()
-            maskBitmap.recycle()
-
-            // ★ 裁剪并缩放延展区（修复：除法重载歧义）
-            val extendAspect = targetW.toFloat() / extendH.toFloat()
-            val aiCropH = (INPUT_SIZE.toFloat() / extendAspect).toInt().coerceAtLeast(1)
-            val croppedAi = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, aiCropH)
-            generated512.recycle()
-
-            val scaledGenerated = Bitmap.createScaledBitmap(croppedAi, targetW, extendH, true)
-            croppedAi.recycle()
-
-            // ★ 颜色匹配（采样原图顶部颜色）
-            val topAvg = ImageProcessingUtils.sampleTopAverageColor(src, 0.12f)
-            val colorMatched = ImageProcessingUtils.matchColorToTarget(scaledGenerated, topAvg)
-            scaledGenerated.recycle()
-
-            // ★ 羽化
-            val feathered = ImageProcessingUtils.applyFeather(colorMatched, config.featherWidth)
-            colorMatched.recycle()
-
-            // ★ 拼接（修复：减法重载歧义）
-            val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(finalBitmap)
-            canvas.drawBitmap(feathered, 0f, 0f, null)
-            feathered.recycle()
-
-            // 原图放在下方
-            val bottomH = (targetH - extendH).coerceAtLeast(0)
-            if (bottomH > 0) {
-                val bottomSrc = Bitmap.createScaledBitmap(scaledSrc, targetW, bottomH, true)
-                canvas.drawBitmap(bottomSrc, 0f, extendH.toFloat(), null)
-                bottomSrc.recycle()
-            }
-            scaledSrc.recycle()
-
-            return@withContext finalBitmap
         }
+
+        val maskBottomH = (extendH * INPUT_SIZE / targetH).coerceAtLeast(1)
+        val maskBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ALPHA_8)
+        Canvas(maskBitmap).apply {
+            drawColor(Color.BLACK)
+            drawRect(
+                0f, 0f, INPUT_SIZE.toFloat(), maskBottomH.toFloat(),
+                Paint().apply { color = Color.WHITE }
+            )
+        }
+
+        val imageTensor = bitmapToTensor(inputBitmap)
+        val maskTensor = maskToTensor(maskBitmap)
+        val outputs = ortSession.run(mapOf("image" to imageTensor, "mask" to maskTensor))
+        val resultTensor = outputs[0] as OnnxTensor
+        val generated512 = floatBufferToBitmap(resultTensor.floatBuffer, INPUT_SIZE, INPUT_SIZE)
+        imageTensor.close(); maskTensor.close(); resultTensor.close(); outputs.close()
+        inputBitmap.recycle(); maskBitmap.recycle(); scaledSrc.recycle()
+        return@withContext generated512
     }
 
     // ===== Tensor 转换工具方法 =====
     private fun bitmapToTensor(bitmap: Bitmap): OnnxTensor {
-        val w = bitmap.width
-        val h = bitmap.height
+        val w = bitmap.width; val h = bitmap.height
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
         val buffer = FloatBuffer.allocate(1 * 3 * h * w)
@@ -200,8 +262,7 @@ class NpuExtendEngine(
     }
 
     private fun maskToTensor(bitmap: Bitmap): OnnxTensor {
-        val w = bitmap.width
-        val h = bitmap.height
+        val w = bitmap.width; val h = bitmap.height
         val pixels = IntArray(w * h)
         bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
         val buffer = FloatBuffer.allocate(1 * 1 * h * w)
