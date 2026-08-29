@@ -1,110 +1,176 @@
 package com.wallpaperextend.ui
 
-import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
-import android.provider.MediaStore
+import android.view.View
 import android.widget.SeekBar
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
-import com.wallpaperextend.BuildConfig
-import com.wallpaperextend.R
-import com.wallpaperextend.WallpaperConfig
-import com.wallpaperextend.processor.ExtendStrategy
-import com.wallpaperextend.processor.NPU.NpuExtendEngine
-import com.wallpaperextend.processor.RenderEffectWallpaperProcessor
-import com.wallpaperextend.processor.WallpaperExtendEngine
-import com.wallpaperextend.saver.MediaStoreSaver
 import com.wallpaperextend.databinding.ActivityMainBinding
-import kotlinx.coroutines.*
+import com.wallpaperextend.processor.WallpaperConfig
+import com.wallpaperextend.processor.WallpaperExtendEngine
+import com.wallpaperextend.util.MediaStoreSaver
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.InputStream
 
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
+    private var engine: WallpaperExtendEngine? = null
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
-    private var engine: ExtendStrategy? = null
-    private var targetHeight = 0
-    private var reprocessJob: Job? = null
-    private var shouldReprocess = false
 
-    companion object {
-        private const val REQ_PICK = 1001
-    }
+    // 参数（默认值与 XML 一致）
+    private var blurRadius = 20f
+    private var extendRatio = 0.37f
+    private var featherWidth = 150
+    private var saturationBoost = 1.1f
+    private var brightnessOffset = 0f
+    private var overlayStrength = 0.15f
+    private var targetHeight = 0
+
+    // ★ 防抖排队：拖动滑块时标记"需要重处理"，正在处理的推理跑完后再触发一次
+    private var shouldReprocess = false
+    private var reprocessJob: Job? = null
+
+    private val pickImageLauncher = registerForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? -> uri?.let { loadImage(it) } }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-
-        binding.btnPick.setOnClickListener {
-            val intent = Intent(Intent.ACTION_PICK, MediaStore.Images.Media.EXTERNAL_CONTENT_URI)
-            startActivityForResult(intent, REQ_PICK)
-        }
-
-        binding.seekHeight.setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
-            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                targetHeight = progress.coerceAtLeast(500)
-                binding.tvHeight.text = "目标高度: $targetHeight"
-                if (fromUser && originalBitmap != null) {
-                    reprocess()
-                }
-            }
-            override fun onStartTrackingTouch(seekBar: SeekBar?) {}
-            override fun onStopTrackingTouch(seekBar: SeekBar?) {}
-        })
-
-        binding.btnProcess.setOnClickListener {
-            originalBitmap?.let { processImage(it) }
-        }
-
-        binding.btnSave.setOnClickListener {
-            processedBitmap?.let { bmp ->
-                val uri = MediaStoreSaver.save(this, bmp, "WallpaperExtend_${System.currentTimeMillis()}")
-                if (uri != null) {
-                    Toast.makeText(this, "已保存到相册", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(this, "保存失败", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-
-        targetHeight = resources.displayMetrics.heightPixels
-        binding.seekHeight.progress = targetHeight
+        // ★ engine 不在 onCreate 创建（避免启动时加载 198MB 模型 → OOM/ANR）
+        setupUI()
     }
 
-    private fun getEngine(): ExtendStrategy {
+    /** 懒加载引擎（用到才加载模型） */
+    private fun getEngine(): WallpaperExtendEngine {
         if (engine == null) {
-            engine = if (BuildConfig.USE_NPU) {
-                NpuExtendEngine().apply { create(this@MainActivity) }
-            } else {
-                WallpaperExtendEngine(RenderEffectWallpaperProcessor())
-            }
+            engine = WallpaperExtendEngine.create(this)
         }
         return engine!!
     }
 
-    private fun reprocess() {
-        val src = originalBitmap ?: return
-        shouldReprocess = true
-        scheduleReprocess()
+    private fun setupUI() {
+        binding.btnPick.setOnClickListener {
+            pickImageLauncher.launch("image/*")
+        }
+
+        binding.btnSave.setOnClickListener {
+            val bmp = processedBitmap
+            if (bmp == null) {
+                Toast.makeText(this, "请先生成延展壁纸", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            saveImage(bmp)
+        }
+
+        binding.seekExtend.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                extendRatio = (progress / 100f).coerceIn(0f, 0.6f)
+                binding.tvExtend.text = "延展比例: ${progress}%"
+                if (fromUser) scheduleReprocess()
+            }
+        })
+        binding.seekBlur.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                blurRadius = progress.toFloat().coerceAtLeast(1f)
+                binding.tvBlur.text = "模糊半径: $progress"
+                if (fromUser) scheduleReprocess()
+            }
+        })
+        binding.seekFeather.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                featherWidth = progress.coerceAtLeast(8)
+                binding.tvFeather.text = "羽化宽度: $progress"
+                if (fromUser) scheduleReprocess()
+            }
+        })
+        binding.seekSaturation.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                saturationBoost = 0.5f + progress / 100f
+                binding.tvSaturation.text = "饱和度: ${"%.1f".format(saturationBoost)}x"
+                if (fromUser) scheduleReprocess()
+            }
+        })
+        binding.seekBrightness.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                brightnessOffset = (progress - 50) / 250f
+                binding.tvBrightness.text = "亮度: ${"%.2f".format(brightnessOffset)}"
+                if (fromUser) scheduleReprocess()
+            }
+        })
+        binding.seekOverlay.setOnSeekBarChangeListener(object : SimpleSeekBar() {
+            override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                overlayStrength = progress / 100f
+                binding.tvOverlay.text = "蒙版强度: ${progress}%"
+                if (fromUser) scheduleReprocess()
+            }
+        })
+
+        binding.etTargetHeight.setOnFocusChangeListener { _, hasFocus ->
+            if (!hasFocus) {
+                targetHeight = binding.etTargetHeight.text.toString().toIntOrNull() ?: 0
+                scheduleReprocess()
+            }
+        }
     }
 
+    private fun loadImage(uri: Uri) {
+        try {
+            val inputStream: InputStream? = contentResolver.openInputStream(uri)
+            originalBitmap = BitmapFactory.decodeStream(inputStream)
+            inputStream?.close()
+            binding.imgOriginal.setImageBitmap(originalBitmap)
+            binding.tvSize.text = "原图尺寸: ${originalBitmap?.width} × ${originalBitmap?.height}"
+            processedBitmap?.recycle()
+            processedBitmap = null
+            binding.btnSave.isEnabled = false
+            shouldReprocess = false
+            scheduleReprocess()
+        } catch (e: Exception) {
+            Toast.makeText(this, "加载图片失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
+    }
+
+    private fun currentConfig(): WallpaperConfig = WallpaperConfig(
+        blurRadius = blurRadius,
+        extendRatio = extendRatio,
+        featherWidth = featherWidth,
+        saturationBoost = saturationBoost,
+        brightnessOffset = brightnessOffset,
+        overlayStrength = overlayStrength
+    )
+
+    // ★ 修复：防抖 + 排队，拖动滑块不再疯狂 cancel → 不再抛 "was cancelled"
     private fun scheduleReprocess() {
+        val src = originalBitmap ?: return
+        shouldReprocess = true
         if (reprocessJob?.isActive == true) {
+            // 正在处理中，本次只标记，等当前推理结束后再触发一次
             return
         }
         reprocessJob = lifecycleScope.launch {
-            delay(300)
+            delay(300) // 防抖
             while (shouldReprocess) {
                 shouldReprocess = false
                 try {
-                    processImage(originalBitmap!!)
+                    processImage(src)
                 } catch (e: Exception) {
                     if (e is CancellationException) {
+                        // ★ 取消异常：静默，继续检查是否需要重处理（不弹 Toast）
                         continue
                     }
                     withContext(Dispatchers.Main) {
@@ -116,31 +182,27 @@ class MainActivity : AppCompatActivity() {
     }
 
     private suspend fun processImage(src: Bitmap) {
-        withContext(Dispatchers.Main) {
-            binding.progress.visibility = android.view.View.VISIBLE
-        }
+        withContext(Dispatchers.Main) { binding.progress.visibility = View.VISIBLE }
         try {
             val dm = resources.displayMetrics
-            val result = withContext(Dispatchers.IO + NonCancellable) {
-                getEngine().process(
-                    context = this@MainActivity,
-                    src = src,
-                    targetW = dm.widthPixels,
-                    targetH = targetHeight,
-                    config = currentConfig()
-                )
-            }
-            if (processedBitmap != null && !processedBitmap!!.isRecycled()) {
-                processedBitmap?.recycle()
-            }
-            processedBitmap = result
-            withContext(Dispatchers.Main) {
-                if (!result.isRecycled()) {
-                    binding.imgResult.setImageBitmap(result)
+            // ★ NonCancellable：保证一次推理完整跑完，不被外部 cancel 打断
+            val result = withContext(Dispatchers.IO) {
+                kotlinx.coroutines.withContext(NonCancellable) {
+                    getEngine().process(
+                        context = this@MainActivity,
+                        src = src,
+                        targetW = dm.widthPixels,
+                        targetH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels,
+                        config = currentConfig()
+                    )
                 }
-                binding.btnSave.isEnabled = true
             }
+            processedBitmap?.recycle()
+            processedBitmap = result
+            binding.imgResult.setImageBitmap(result)
+            binding.btnSave.isEnabled = true
         } catch (e: Exception) {
+            // 外部 cancel 不弹提示
             if (e !is CancellationException) {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
@@ -148,28 +210,26 @@ class MainActivity : AppCompatActivity() {
                 e.printStackTrace()
             }
         } finally {
-            withContext(Dispatchers.Main) {
-                binding.progress.visibility = android.view.View.GONE
-            }
+            withContext(Dispatchers.Main) { binding.progress.visibility = View.GONE }
         }
     }
 
-    private fun currentConfig() = WallpaperConfig(
-        extendTop = true,
-        extendBottom = false,
-        extendLeft = false,
-        extendRight = false,
-        blurRadius = binding.seekBlur.progress,
-        scaleRatio = 1.0f
-    )
-
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_PICK && resultCode == RESULT_OK) {
-            data?.data?.let { uri: Uri ->
-                originalBitmap = BitmapFactory.decodeStream(contentResolver.openInputStream(uri))
-                binding.imgOriginal.setImageBitmap(originalBitmap)
-                binding.btnProcess.isEnabled = true
+    private fun saveImage(bmp: Bitmap) {
+        lifecycleScope.launch {
+            try {
+                val uri = withContext(Dispatchers.IO) {
+                    MediaStoreSaver.save(
+                        this@MainActivity, bmp,
+                        "WallpaperExtend_${System.currentTimeMillis()}.png"
+                    )
+                }
+                if (uri != null) {
+                    Toast.makeText(this@MainActivity, "已保存到相册", Toast.LENGTH_LONG).show()
+                } else {
+                    Toast.makeText(this@MainActivity, "保存失败", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(this@MainActivity, "保存失败: ${e.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -180,5 +240,11 @@ class MainActivity : AppCompatActivity() {
         engine?.release()
         originalBitmap?.recycle()
         processedBitmap?.recycle()
+    }
+
+    /** 简易 SeekBar 监听器，子类按需重写 onProgressChanged */
+    abstract class SimpleSeekBar : SeekBar.OnSeekBarChangeListener {
+        override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+        override fun onStopTrackingTouch(seekBar: SeekBar?) {}
     }
 }
