@@ -17,10 +17,14 @@ import kotlin.math.max
 import kotlin.math.min
 
 /**
- * 壁纸处理统一入口。
+ * 壁纸处理统一入口（混合架构）。
+ *
+ * 管线：
+ *   1. GPU（stackBlur）生成主体延展区 —— 永远执行，保证不出纯色块（兜底）。
+ *   2. 若 useNpu = true，截取原图顶部边缘条带，交给 NpuExtendEngine 生成局部过渡区，
+ *      覆盖绘制在原图与延展区的接缝处，实现更自然的 AI 过渡。NPU 失败自动降级，不影响主体。
+ *
  * - process 为 suspend 函数，在 Dispatchers.Default 中执行，不阻塞 UI。
- * - useNpu = true：延展区由 NpuExtendEngine.generateExtensionBlock 生成（AI）；
- *   useNpu = false：延展区由 stackBlur 模糊拉伸生成（CPU 兜底）。
  * - extendRatio 作为"最大延展比例"，实际延展高度由内部动态计算。
  */
 object WallpaperProcessor {
@@ -34,8 +38,7 @@ object WallpaperProcessor {
     }
 
     /**
-     * ★ 修改后的入口：suspend + context + useNpu
-     * ★ config 类型改为 WallpaperConfig（与 MainActivity 对齐）
+     * 统一入口：suspend + context + useNpu
      */
     suspend fun process(
         context: Context,
@@ -56,7 +59,7 @@ object WallpaperProcessor {
         val scaledH = ceil(src.height * targetW.toFloat() / src.width).toInt().coerceAtLeast(1)
         val scaled = Bitmap.createScaledBitmap(src, scaledW, scaledH, true)
 
-        // 实际延展高度：若 topOnly，则延展区填满"原图上方剩余空间"，上限受 extendRatio 约束
+        // 实际延展高度：若 topOnly，延展区填满"原图上方剩余空间"，上限受 extendRatio 约束
         val maxExtend = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt()
         val extendH = if (config.topOnly) {
             (targetH - scaledH).coerceAtLeast(0).coerceAtMost(maxExtend)
@@ -66,15 +69,7 @@ object WallpaperProcessor {
 
         val srcDrawY = (targetH - scaledH).toFloat()
 
-        // ★ 先画原图
-        canvas.drawBitmap(
-            scaled,
-            0f,
-            srcDrawY,
-            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-        )
-
-        // ★ 延展区（NPU 或 stackBlur）
+        // ★ 延展区（GPU 主体 + 可选 NPU 接缝细化）
         if (extendH > 0) {
             drawTopExtension(
                 context = context,
@@ -83,11 +78,19 @@ object WallpaperProcessor {
                 src = src,
                 targetW = targetW,
                 extendH = extendH,
-                blurRadius = config.blurRadius.toInt(),  // ← Float → Int 转换
+                blurRadius = config.blurRadius.toInt(),
                 feather = config.featherWidth,
                 useNpu = useNpu
             )
         }
+
+        // ★ 再画原图（原图覆盖在延展区下方接缝之上，形成自然衔接）
+        canvas.drawBitmap(
+            scaled,
+            0f,
+            srcDrawY,
+            Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+        )
 
         // 底部填充
         if (srcDrawY + scaledH < targetH) {
@@ -105,7 +108,7 @@ object WallpaperProcessor {
         return out
     }
 
-    // ★ useNpu 分支：true → NpuExtendEngine.generateExtensionBlock；false → stackBlur
+    // ★ 混合架构：GPU 主体延展 + NPU 接缝细化
     private suspend fun drawTopExtension(
         context: Context,
         canvas: Canvas,
@@ -119,29 +122,42 @@ object WallpaperProcessor {
     ) {
         if (extendH <= 0) return
 
+        // ===== 第一步：GPU 主体延展（永远执行，保证不出纯色块）=====
+        drawStackBlurExtension(canvas, scaled, src, targetW, extendH, blurRadius, feather)
+
+        // ===== 第二步：NPU 接缝细化（可选，失败自动降级）=====
         if (useNpu && getNpu(context).isAvailable()) {
-            // ===== NPU：生成纯延展块，直接绘制 =====
-            val stripH = max(8, scaled.height / 6)
-            val topStrip = Bitmap.createBitmap(scaled, 0, 0, scaled.width, stripH)
             try {
-                val block = getNpu(context).generateExtensionBlock(
+                // 过渡区高度：取 feather 宽度与 extendH 的较小值，至少 100px
+                val transitionH = minOf(extendH, feather.coerceAtLeast(100))
+
+                // 截取原图顶部边缘条带（高度 100px 或原图高度的 1/4）
+                val edgeStripH = minOf(100, src.height / 4).coerceAtLeast(8)
+                val edgeStrip = Bitmap.createBitmap(src, 0, 0, src.width, edgeStripH)
+
+                // 送入 NPU 生成接缝过渡区
+                val npuTransition = getNpu(context).generateExtensionBlock(
                     context = context,
-                    srcTopStrip = topStrip,
+                    srcTopStrip = edgeStrip,
                     targetW = targetW,
-                    extendH = extendH,
+                    extendH = transitionH,
                     featherWidth = feather
                 )
-                canvas.drawBitmap(block, 0f, 0f, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
-                block.recycle()
+
+                // 绘制位置：覆盖在 GPU 延展区底部与原图顶部重叠处（接缝位置）
+                // 这样一半覆盖延展区、一半覆盖原图顶部，实现自然融合
+                val drawY = (extendH - transitionH / 2f).coerceAtLeast(0f)
+                val paint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+                    xfermode = PorterDuffXfermode(PorterDuff.Mode.SRC_OVER)
+                }
+                canvas.drawBitmap(npuTransition, 0f, drawY, paint)
+
+                npuTransition.recycle()
+                edgeStrip.recycle()
             } catch (e: Exception) {
-                // NPU 失败降级到 stackBlur
-                drawStackBlurExtension(canvas, scaled, src, targetW, extendH, blurRadius, feather)
-            } finally {
-                topStrip.recycle()
+                // NPU 细化失败不影响 GPU 主体效果，仅打印日志降级
+                e.printStackTrace()
             }
-        } else {
-            // ===== CPU 兜底：stackBlur 模糊拉伸（原逻辑） =====
-            drawStackBlurExtension(canvas, scaled, src, targetW, extendH, blurRadius, feather)
         }
     }
 
