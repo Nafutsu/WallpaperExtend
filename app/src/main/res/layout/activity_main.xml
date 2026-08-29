@@ -82,6 +82,17 @@
                 android:textSize="13sp"
                 android:textColor="@color/text_secondary"
                 android:layout_marginTop="8dp" />
+            
+            <!-- ★ 新增：NPU 开关 -->
+            <CheckBox
+                android:id="@+id/cbUseNpu"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="使用 NPU AI 生成（取消则使用 GPU 模糊）"
+                android:checked="true"
+                android:textSize="13sp"
+                android:textColor="@color/text_secondary"
+                android:layout_marginTop="4dp" />
         </LinearLayout>
 
         <!-- 原图预览 -->
