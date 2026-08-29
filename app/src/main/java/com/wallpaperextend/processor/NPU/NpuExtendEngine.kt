@@ -10,6 +10,7 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
+import com.wallpaperextend.processor.NPUImageProcessingUtils
 import com.wallpaperextend.processor.WallpaperConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
