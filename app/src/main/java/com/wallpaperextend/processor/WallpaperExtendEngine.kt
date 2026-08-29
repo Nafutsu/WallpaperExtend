@@ -2,69 +2,46 @@ package com.wallpaperextend.processor
 
 import android.content.Context
 import android.graphics.Bitmap
-import androidx.lifecycle.Lifecycle
 import com.wallpaperextend.processor.NPU.NpuExtendEngine
 
 /**
- * ★ 兼容层（原 WallpaperExtendEngine）。
- * 不再重复定义 WallpaperConfig —— 统一以 [WallpaperConfig]（WallpaperConfig.kt）为准。
- * 内部委托给 [WallpaperProcessor]，移除旧依赖。
+ * 兼容委托层：保留旧 API，内部转发给 [WallpaperProcessor]。
+ *
+ * ★ 注意：本类只做薄封装，不持有任何配置数据类（无 Config / Mode）。
+ *   所有参数通过 [WallpaperConfig] 传递。
  */
-class WallpaperExtendEngine private constructor(
-    private val context: Context
-) {
+class WallpaperExtendEngine(context: Context) {
 
-    private val processor = WallpaperProcessor
-    private var npu: NpuExtendEngine? = null
+    private val appContext: Context = context.applicationContext
 
-    companion object {
-        /** 兼容旧调用：WallpaperExtendEngine.create(context) */
-        fun create(context: Context): WallpaperExtendEngine =
-            WallpaperExtendEngine(context.applicationContext)
-    }
-
-    /**
-     * 统一处理入口（兼容旧签名）。
-     * @param useNpu 是否使用 NPU AI 生成（默认 true，不可用时自动降级 CPU）
-     */
-    suspend fun process(
-        context: Context = this.context,
+    // 若外部需要"默认参数"，直接用 WallpaperConfig() 即可（它有默认值）
+    fun process(
         src: Bitmap,
         targetW: Int,
         targetH: Int,
         config: WallpaperConfig = WallpaperConfig(),
         useNpu: Boolean = true
     ): Bitmap {
-        val wpConfig = WallpaperProcessor.Config(
-            blurRadius = config.blurRadius.toInt(),
-            extendRatio = config.extendRatio,
-            featherWidth = config.featherWidth,
-            topOnly = config.topOnly,
-            mode = WallpaperProcessor.Mode.LIGHT
-        )
-        return processor.process(
-            context = context,
-            src = src,
-            targetW = targetW,
-            targetH = targetH,
-            config = wpConfig,
-            useNpu = useNpu && isNpuAvailable()
-        )
+        // 因为旧 API 不是 suspend，这里用 runBlocking 桥接（主线程调用会阻塞，慎用）
+        return kotlinx.coroutines.runBlocking {
+            WallpaperProcessor.process(
+                context = appContext,
+                src = src,
+                targetW = targetW,
+                targetH = targetH,
+                config = config,
+                useNpu = useNpu
+            )
+        }
     }
 
-    fun isNpuAvailable(): Boolean {
-        if (npu == null) npu = NpuExtendEngine(context)
-        return npu?.isAvailable() == true
-    }
-
+    /** 释放 NPU 资源（转发） */
     fun release() {
-        npu?.release()
-        processor.release()
-        npu = null
+        WallpaperProcessor.release()
     }
 
-    /** 生命周期兼容（旧代码可能在 onDestroy 调用） */
-    fun bindToLifecycle(lifecycle: Lifecycle) {
-        // 无需实际操作；NPU 引擎在 release() 时释放
+    /** 预加载模型（可选，首次 process 会自动加载） */
+    fun warmup() {
+        // NpuExtendEngine 内部会在首次 extend 时 loadModels()
     }
 }
