@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.net.Uri
 import android.os.Bundle
 import android.view.View
+import android.widget.CheckBox
 import android.widget.SeekBar
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -27,6 +28,9 @@ class MainActivity : AppCompatActivity() {
     private lateinit var binding: ActivityMainBinding
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
+
+    // ★ cbUseNpu：若 activity_main.xml 中已声明 id=cbUseNpu 则可用，否则为 null（容错，编译运行均安全）
+    private val cbUseNpu: CheckBox? by lazy { findViewById(R.id.cbUseNpu) }
 
     // 参数（默认值与 XML 一致）
     private var blurRadius = 20f
@@ -124,8 +128,8 @@ class MainActivity : AppCompatActivity() {
         binding.seekBrightness.progress = 52      // +0.08
         binding.seekOverlay.progress = 10         // 10%
         binding.cbTopOnly.isChecked = true
-        // 新增 cbUseNpu：若 XML 中已添加则默认勾选（安全调用，缺 ID 不崩溃）
-        binding.cbUseNpu?.isChecked = true
+        // 新增 cbUseNpu：若 XML 中已添加则默认勾选（缺 ID 时为 null，不生效）
+        cbUseNpu?.isChecked = true
 
         binding.tvExtend.text = "延展比例: 40%"
         binding.tvBlur.text = "模糊半径: 15"
@@ -145,7 +149,7 @@ class MainActivity : AppCompatActivity() {
         // ==================== 5.1 绑定复选框 ====================
         binding.cbTopOnly.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
         // cbUseNpu 变化时也触发重处理（若 XML 中无此 ID，?. 安全跳过）
-        binding.cbUseNpu?.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
+        cbUseNpu?.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
         // ==================================================================
     }
 
@@ -174,8 +178,8 @@ class MainActivity : AppCompatActivity() {
         topOnly = binding.cbTopOnly.isChecked
     )
 
-    /** 是否使用 NPU（从新增的 cbUseNpu 读取） */
-    private fun useNpu(): Boolean = binding.cbUseNpu?.isChecked == true
+    /** 是否使用 NPU（从新增的 cbUseNpu 读取，缺 ID 时默认 true） */
+    private fun useNpu(): Boolean = cbUseNpu?.isChecked != false
 
     // ★ 防抖 + 排队
     private fun scheduleReprocess() {
