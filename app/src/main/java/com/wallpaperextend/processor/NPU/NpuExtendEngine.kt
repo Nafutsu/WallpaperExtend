@@ -12,8 +12,8 @@ import android.util.Log
 import com.wallpaperextend.processor.WallpaperConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import java.io.File
 import java.nio.FloatBuffer
-import java.util.EnumSet
 
 /**
  * NPU 神经网络延展引擎（方案一 + 选择1：LaMa ONNX + 端侧推理）
@@ -30,6 +30,7 @@ class NpuExtendEngine(
     companion object {
         private const val TAG = "NpuExtendEngine"
         private const val MODEL_PATH = "models/image_extension_lama.onnx"
+        private const val MODEL_FILE_NAME = "image_extension_lama.onnx"
         private const val INPUT_SIZE = 512
     }
 
@@ -54,21 +55,36 @@ class NpuExtendEngine(
         try {
             env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
-                // ★ 启用 NNAPI（自动选择 NPU / GPU / DSP）
-                // 无参版本，不依赖 NNAPIFlags，兼容性好
+                // ★ 启用 NNAPI（自动选择 NPU / GPU / DSP），失败降级 CPU
                 try {
                     addNnapi()
                 } catch (e: Throwable) {
                     Log.d(TAG, "NNAPI not available, fallback to CPU: ${e.message}")
                 }
-                // 如需带 Flags（可选），确保 import java.util.EnumSet 并使用：
-                // addNnapi(EnumSet.of(ai.onnxruntime.providers.NNAPIFlags.USE_FP16))
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
-            val modelBytes = context.assets.open(MODEL_PATH).readBytes()
-            session = env!!.createSession(modelBytes, opts)
+
+            // ★ 修复 OOM：把 assets 模型复制到内部存储，再用文件路径加载
+            //   （避免在 Java 堆上一次性分配 ~198MB 的 byte[]）
+            val modelFile = File(context.filesDir, MODEL_FILE_NAME)
+            if (!modelFile.exists()) {
+                Log.d(TAG, "Copying model from assets to internal storage...")
+                context.assets.open(MODEL_PATH).use { input ->
+                    modelFile.outputStream().use { output ->
+                        val buffer = ByteArray(8 * 1024) // 8KB 缓冲，不占大量内存
+                        var bytesRead: Int
+                        while (input.read(buffer).also { bytesRead = it } != -1) {
+                            output.write(buffer, 0, bytesRead)
+                        }
+                    }
+                }
+                Log.d(TAG, "Model copied: ${modelFile.absolutePath} (${modelFile.length()} bytes)")
+            }
+
+            // ★ 从文件路径加载，不在 Java 堆分配 198MB
+            session = env!!.createSession(modelFile.absolutePath, opts)
             isInitialized = true
-            Log.d(TAG, "✅ Model loaded: $MODEL_PATH")
+            Log.d(TAG, "✅ Model loaded successfully from: ${modelFile.absolutePath}")
         } catch (e: Exception) {
             Log.e(TAG, "Failed to load model", e)
         }
