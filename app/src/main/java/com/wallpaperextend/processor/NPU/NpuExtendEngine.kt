@@ -13,16 +13,15 @@ import com.wallpaperextend.processor.WallpaperConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.nio.FloatBuffer
-
-// ★ 修复1：导入 NNAPIFlags（SessionOptions 的内部类，用完整路径引用）
-import ai.onnxruntime.OrtSession.SessionOptions.NNAPIFlags
+import java.util.EnumSet
 
 /**
  * NPU 神经网络延展引擎（方案一 + 选择1：LaMa ONNX + 端侧推理）
  *
- * 流程：原图 → 构造 image + mask 输入 → ONNX Runtime 推理（NNAPI/GPU/CPU）→ 生成扩展区 → 拼接 → 输出
+ * 流程：原图 → 构造 image + mask 输入 → ONNX Runtime 推理 → 生成扩展区 → 拼接 → 输出
  *
- * 执行提供者优先级：NNAPI（骁龙/联发科 NPU）> CPU
+ * 执行提供者：默认让 ORT 自动选择（CPU / NNAPI / QNN）。
+ * 如需强制启用 NPU，可在 SessionOptions 里 addConfigEntry 或用 addNnapi。
  */
 class NpuExtendEngine(
     private val context: Context
@@ -55,9 +54,15 @@ class NpuExtendEngine(
         try {
             env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
-                // ★ 修复1：addNnapi(EnumSet<NNAPIFlags>) — 使用导入的 NNAPIFlags
-                @Suppress("UNCHECKED_CAST")
-                addNnapi(java.util.EnumSet.noneOf(NNAPIFlags::class.java))
+                // ★ 启用 NNAPI（自动选择 NPU / GPU / DSP）
+                // 无参版本，不依赖 NNAPIFlags，兼容性好
+                try {
+                    addNnapi()
+                } catch (e: Throwable) {
+                    Log.d(TAG, "NNAPI not available, fallback to CPU: ${e.message}")
+                }
+                // 如需带 Flags（可选），确保 import java.util.EnumSet 并使用：
+                // addNnapi(EnumSet.of(ai.onnxruntime.providers.NNAPIFlags.USE_FP16))
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
             val modelBytes = context.assets.open(MODEL_PATH).readBytes()
@@ -76,6 +81,7 @@ class NpuExtendEngine(
         targetH: Int,
         config: WallpaperConfig
     ): Bitmap = withContext(Dispatchers.Default) {
+
         if (!isInitialized) loadModels()
         val ortSession = session ?: throw IllegalStateException("NPU model not loaded")
 
@@ -84,7 +90,7 @@ class NpuExtendEngine(
         val scaledH = (targetW.toFloat() / src.width * src.height).toInt().coerceAtLeast(1)
         val scaledSrc = Bitmap.createScaledBitmap(src, targetW, scaledH, true)
 
-        // 3. 构造 512x512 模型输入（原图放底部，顶部留黑待生成）
+        // 构造 512x512 模型输入（原图放底部，顶部留黑待生成）
         val inputBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ARGB_8888)
         Canvas(inputBitmap).apply {
             drawColor(Color.BLACK)
@@ -94,7 +100,7 @@ class NpuExtendEngine(
             drawBitmap(scaledSrc, srcRect, dstRect, null)
         }
 
-        // 4. 构造 mask（顶部区域标记为待生成）
+        // 构造 mask（顶部区域标记为待生成）
         val maskH = (extendH * INPUT_SIZE / targetH).coerceAtLeast(1)
         val maskBitmap = Bitmap.createBitmap(INPUT_SIZE, INPUT_SIZE, Bitmap.Config.ALPHA_8)
         Canvas(maskBitmap).apply {
@@ -103,20 +109,18 @@ class NpuExtendEngine(
             drawRect(0f, 0f, INPUT_SIZE.toFloat(), maskH.toFloat(), paint)
         }
 
-        // 5. Bitmap → Tensor
+        // Bitmap → Tensor
         val imageTensor = bitmapToTensor(inputBitmap)
         val maskTensor = maskToTensor(maskBitmap)
 
-        // 6. ★ NPU 推理
+        // ★ NPU 推理
         val inputs = mapOf("image" to imageTensor, "mask" to maskTensor)
         val outputs = ortSession.run(inputs)
-        // ★ 修复2：OrtSession.Result 用 get(int) 取 OnnxTensor，再用 floatBuffer 读数据
         val resultTensor = outputs[0] as OnnxTensor
         val resultBuffer = resultTensor.floatBuffer
-        // 将 FloatBuffer 转为 4D 数组 [1, 3, H, W]
         val generated512 = floatBufferToBitmap(resultBuffer, INPUT_SIZE, INPUT_SIZE)
 
-        // 8. 拼接：生成的顶部延展区 + 原图
+        // 拼接：生成的顶部延展区 + 原图
         val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
         Canvas(finalBitmap).apply {
             val topH = (extendH * INPUT_SIZE / targetH).coerceAtLeast(1)
@@ -134,7 +138,6 @@ class NpuExtendEngine(
             topRegion.recycle()
         }
 
-        // ★ 修复3：OnnxTensor / OrtSession.Result 不需要手动 close()
         inputBitmap.recycle()
         maskBitmap.recycle()
         generated512.recycle()
@@ -174,11 +177,11 @@ class NpuExtendEngine(
     }
 
     private fun floatBufferToBitmap(
-        buffer: java.nio.FloatBuffer,
+        buffer: FloatBuffer,
         w: Int,
         h: Int
     ): Bitmap {
-        // buffer 布局：[1, 3, H, W]，即 R/G/B 三个平面依次排列
+        // buffer 布局：[1, 3, H, W]，R/G/B 三个平面依次排列
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(w * h)
         val planeSize = w * h
