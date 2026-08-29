@@ -23,7 +23,16 @@ import java.io.InputStream
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private lateinit var engine: WallpaperExtendEngine
+    // ★ 懒加载：不在 onCreate 里初始化，避免启动时加载 198MB 模型导致 OOM
+    private var engine: WallpaperExtendEngine? = null
+
+    private fun getEngine(): WallpaperExtendEngine {
+        if (engine == null) {
+            engine = WallpaperExtendEngine.create(this)
+        }
+        return engine!!
+    }
+
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
@@ -47,7 +56,7 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        engine = WallpaperExtendEngine.create(this)
+        // ★ engine 不再这里创建，等用户操作时通过 getEngine() 懒加载
         setupUI()
     }
 
@@ -164,7 +173,7 @@ class MainActivity : AppCompatActivity() {
         try {
             val dm = resources.displayMetrics
             val result = withContext(Dispatchers.IO) {
-                engine.process(
+                getEngine().process(
                     context = this@MainActivity,
                     src = src,
                     targetW = dm.widthPixels,
@@ -204,7 +213,7 @@ class MainActivity : AppCompatActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        engine.release()
+        engine?.release()
         originalBitmap?.recycle()
         processedBitmap?.recycle()
     }
