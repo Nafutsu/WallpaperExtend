@@ -11,7 +11,9 @@ import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
+import com.wallpaperextend.R
 import com.wallpaperextend.databinding.ActivityMainBinding
+import com.wallpaperextend.processor.WallpaperConfig
 import com.wallpaperextend.processor.WallpaperProcessor
 import com.wallpaperextend.util.MediaStoreSaver
 import kotlinx.coroutines.CancellationException
@@ -29,10 +31,7 @@ class MainActivity : AppCompatActivity() {
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
-    // ★ cbUseNpu：若 activity_main.xml 中已声明 id=cbUseNpu 则可用，否则为 null（容错，编译运行均安全）
-    private val cbUseNpu: CheckBox? by lazy { findViewById(R.id.cbUseNpu) }
-
-    // 参数（默认值与 XML 一致）
+    // 参数
     private var blurRadius = 20f
     private var extendRatio = 0.37f
     private var featherWidth = 150
@@ -41,7 +40,9 @@ class MainActivity : AppCompatActivity() {
     private var overlayStrength = 0.15f
     private var targetHeight = 0
 
-    // ★ 防抖排队：拖动滑块时标记"需要重处理"，正在处理的推理跑完后再触发一次
+    // NPU 开关（通过 findViewById 安全获取）
+    private val cbUseNpu: CheckBox? by lazy { findViewById<CheckBox?>(R.id.cbUseNpu) }
+
     private var shouldReprocess = false
     private var reprocessJob: Job? = null
 
@@ -53,7 +54,6 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        // ★ 不再依赖 WallpaperExtendEngine，统一走 WallpaperProcessor
         setupUI()
     }
 
@@ -120,16 +120,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
 
-        // ==================== 5.2 设置 iOS 风格默认参数 ====================
-        binding.seekExtend.progress = 40          // 40%
-        binding.seekBlur.progress = 15            // 半径 15
-        binding.seekFeather.progress = 180        // 羽化 180px
-        binding.seekSaturation.progress = 60      // 1.1x
-        binding.seekBrightness.progress = 52      // +0.08
-        binding.seekOverlay.progress = 10         // 10%
+        // ==================== iOS 风格默认参数 ====================
+        binding.seekExtend.progress = 40
+        binding.seekBlur.progress = 15
+        binding.seekFeather.progress = 180
+        binding.seekSaturation.progress = 60
+        binding.seekBrightness.progress = 52
+        binding.seekOverlay.progress = 10
         binding.cbTopOnly.isChecked = true
-        // 新增 cbUseNpu：若 XML 中已添加则默认勾选（缺 ID 时为 null，不生效）
-        cbUseNpu?.isChecked = true
+        cbUseNpu?.isChecked = true   // ← 新增：NPU 默认开启
 
         binding.tvExtend.text = "延展比例: 40%"
         binding.tvBlur.text = "模糊半径: 15"
@@ -144,13 +143,16 @@ class MainActivity : AppCompatActivity() {
         saturationBoost = 1.1f
         brightnessOffset = 0.08f
         overlayStrength = 0.10f
-        // ==================================================================
+        // ==========================================================
 
-        // ==================== 5.1 绑定复选框 ====================
-        binding.cbTopOnly.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
-        // cbUseNpu 变化时也触发重处理（若 XML 中无此 ID，?. 安全跳过）
-        cbUseNpu?.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
-        // ==================================================================
+        // ==================== 绑定监听器 ====================
+        binding.cbTopOnly.setOnCheckedChangeListener { _, _ ->
+            scheduleReprocess()
+        }
+        cbUseNpu?.setOnCheckedChangeListener { _, _ ->
+            scheduleReprocess()
+        }
+        // ====================================================
     }
 
     private fun loadImage(uri: Uri) {
@@ -170,18 +172,16 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    /** 当前配置（含 topOnly） */
-    private fun currentConfig(): WallpaperProcessor.Config = WallpaperProcessor.Config(
-        blurRadius = blurRadius.toInt(),
+    private fun currentConfig(): WallpaperConfig = WallpaperConfig(
+        blurRadius = blurRadius,
         extendRatio = extendRatio,
         featherWidth = featherWidth,
+        saturationBoost = saturationBoost,
+        brightnessOffset = brightnessOffset,
+        overlayStrength = overlayStrength,
         topOnly = binding.cbTopOnly.isChecked
     )
 
-    /** 是否使用 NPU（从新增的 cbUseNpu 读取，缺 ID 时默认 true） */
-    private fun useNpu(): Boolean = cbUseNpu?.isChecked != false
-
-    // ★ 防抖 + 排队
     private fun scheduleReprocess() {
         val src = originalBitmap ?: return
         shouldReprocess = true
@@ -202,11 +202,11 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ★ 调用 WallpaperProcessor.process（suspend，已在 Dispatchers.Default 执行）
     private suspend fun processImage(src: Bitmap) {
         withContext(Dispatchers.Main) { binding.progress.visibility = View.VISIBLE }
         try {
             val dm = resources.displayMetrics
+            val useNpu = cbUseNpu?.isChecked ?: true
             val result = withContext(Dispatchers.IO) {
                 kotlinx.coroutines.withContext(NonCancellable) {
                     WallpaperProcessor.process(
@@ -215,7 +215,7 @@ class MainActivity : AppCompatActivity() {
                         targetW = dm.widthPixels,
                         targetH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels,
                         config = currentConfig(),
-                        useNpu = useNpu()   // ← 从 cbUseNpu 读取
+                        useNpu = useNpu
                     )
                 }
             }
@@ -258,12 +258,10 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         reprocessJob?.cancel()
-        WallpaperProcessor.release()   // ★ 替代 engine?.release()
         originalBitmap?.recycle()
         processedBitmap?.recycle()
     }
 
-    /** 简易 SeekBar 监听器 */
     abstract class SimpleSeekBar : SeekBar.OnSeekBarChangeListener {
         override fun onStartTrackingTouch(seekBar: SeekBar?) {}
         override fun onStopTrackingTouch(seekBar: SeekBar?) {}
