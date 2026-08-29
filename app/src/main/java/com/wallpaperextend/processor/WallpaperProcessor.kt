@@ -25,18 +25,9 @@ import kotlin.math.min
  */
 object WallpaperProcessor {
 
-    enum class Mode { LIGHT, DARK }
-
-    data class Config(
-        val blurRadius: Int = 32,
-        val extendRatio: Float = 0.37f,   // 最大延展比例
-        val featherWidth: Int = 150,
-        val topOnly: Boolean = true,
-        val mode: Mode = Mode.LIGHT
-    )
-
     // 持有 NPU 引擎（懒加载，进程级单例）
     private var npuEngine: NpuExtendEngine? = null
+
     private fun getNpu(context: Context): NpuExtendEngine {
         if (npuEngine == null) npuEngine = NpuExtendEngine(context.applicationContext)
         return npuEngine!!
@@ -44,13 +35,14 @@ object WallpaperProcessor {
 
     /**
      * ★ 修改后的入口：suspend + context + useNpu
+     * ★ config 类型改为 WallpaperConfig（与 MainActivity 对齐）
      */
     suspend fun process(
         context: Context,
         src: Bitmap,
         targetW: Int,
         targetH: Int,
-        config: Config = Config(),
+        config: WallpaperConfig,
         useNpu: Boolean = false
     ): Bitmap {
         if (targetW <= 0 || targetH <= 0) return src
@@ -91,7 +83,7 @@ object WallpaperProcessor {
                 src = src,
                 targetW = targetW,
                 extendH = extendH,
-                blurRadius = config.blurRadius,
+                blurRadius = config.blurRadius.toInt(),  // ← Float → Int 转换
                 feather = config.featherWidth,
                 useNpu = useNpu
             )
@@ -153,7 +145,7 @@ object WallpaperProcessor {
         }
     }
 
-    // 原 WallpaperProcessor 的 drawTopExtension 逻辑，完整保留
+    // 原 WallpaperProcessor 的 drawStackBlurExtension 逻辑，完整保留（不变）
     private fun drawStackBlurExtension(
         canvas: Canvas,
         scaled: Bitmap,
@@ -170,14 +162,11 @@ object WallpaperProcessor {
             Matrix().apply { setRotate(180f) }, true
         )
         topStrip.recycle()
-
         val stretched = Bitmap.createScaledBitmap(rotated, targetW, extendH, true)
         rotated.recycle()
-
         val blurred = NPUImageProcessingUtils.stackBlur(stretched, blurRadius.coerceIn(0, 80))
         if (blurred !== stretched) stretched.recycle()
 
-        // 极淡色调底色
         val topAvg = NPUImageProcessingUtils.sampleTopEdgeColor(src, ratio = 0.12f)
         val tone = NPUImageProcessingUtils.lighten(topAvg, factor = 0.2f)
         val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -185,19 +174,16 @@ object WallpaperProcessor {
         }
         canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
 
-        // 模糊层向下延伸覆盖原图顶部
         val effectiveFeather = feather.coerceAtLeast(50).coerceAtMost(200)
         val overlayBottom = extendH + effectiveFeather
         val overlayBmp = Bitmap.createScaledBitmap(blurred, targetW, overlayBottom, true)
         if (overlayBmp !== blurred) blurred.recycle()
 
         canvas.drawBitmap(
-            overlayBmp,
-            0f, 0f,
+            overlayBmp, 0f, 0f,
             Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
         )
 
-        // 渐变淡出
         val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
             shader = LinearGradient(
@@ -217,7 +203,6 @@ object WallpaperProcessor {
             fadePaint
         )
         canvas.restoreToCount(layerId)
-
         if (overlayBmp !== scaled) overlayBmp.recycle()
     }
 
