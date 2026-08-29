@@ -11,8 +11,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.lifecycle.lifecycleScope
 import com.wallpaperextend.databinding.ActivityMainBinding
-import com.wallpaperextend.processor.WallpaperConfig
-import com.wallpaperextend.processor.WallpaperExtendEngine
+import com.wallpaperextend.processor.WallpaperProcessor
 import com.wallpaperextend.util.MediaStoreSaver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -26,7 +25,6 @@ import java.io.InputStream
 class MainActivity : AppCompatActivity() {
 
     private lateinit var binding: ActivityMainBinding
-    private var engine: WallpaperExtendEngine? = null
     private var originalBitmap: Bitmap? = null
     private var processedBitmap: Bitmap? = null
 
@@ -51,16 +49,8 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
-        // ★ engine 不在 onCreate 创建（避免启动时加载 198MB 模型 → OOM/ANR）
+        // ★ 不再依赖 WallpaperExtendEngine，统一走 WallpaperProcessor
         setupUI()
-    }
-
-    /** 懒加载引擎（用到才加载模型） */
-    private fun getEngine(): WallpaperExtendEngine {
-        if (engine == null) {
-            engine = WallpaperExtendEngine.create(this)
-        }
-        return engine!!
     }
 
     private fun setupUI() {
@@ -127,7 +117,6 @@ class MainActivity : AppCompatActivity() {
         }
 
         // ==================== 5.2 设置 iOS 风格默认参数 ====================
-        // 设置 iOS 风格默认参数（与 XML 初始值不同）
         binding.seekExtend.progress = 40          // 40%
         binding.seekBlur.progress = 15            // 半径 15
         binding.seekFeather.progress = 180        // 羽化 180px
@@ -135,8 +124,9 @@ class MainActivity : AppCompatActivity() {
         binding.seekBrightness.progress = 52      // +0.08
         binding.seekOverlay.progress = 10         // 10%
         binding.cbTopOnly.isChecked = true
+        // 新增 cbUseNpu：若 XML 中已添加则默认勾选（安全调用，缺 ID 不崩溃）
+        binding.cbUseNpu?.isChecked = true
 
-        // 更新对应的 TextView（否则显示还是旧值）
         binding.tvExtend.text = "延展比例: 40%"
         binding.tvBlur.text = "模糊半径: 15"
         binding.tvFeather.text = "羽化宽度: 180"
@@ -144,7 +134,6 @@ class MainActivity : AppCompatActivity() {
         binding.tvBrightness.text = "亮度: 0.08"
         binding.tvOverlay.text = "蒙版强度: 10%"
 
-        // 同步成员变量
         extendRatio = 0.40f
         blurRadius = 15f
         featherWidth = 180
@@ -153,10 +142,10 @@ class MainActivity : AppCompatActivity() {
         overlayStrength = 0.10f
         // ==================================================================
 
-        // ==================== 5.1 绑定 cbTopOnly 复选框 ====================
-        binding.cbTopOnly.setOnCheckedChangeListener { _, _ ->
-            scheduleReprocess()
-        }
+        // ==================== 5.1 绑定复选框 ====================
+        binding.cbTopOnly.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
+        // cbUseNpu 变化时也触发重处理（若 XML 中无此 ID，?. 安全跳过）
+        binding.cbUseNpu?.setOnCheckedChangeListener { _, _ -> scheduleReprocess() }
         // ==================================================================
     }
 
@@ -177,37 +166,30 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    // ==================== 5.3 修改 currentConfig() 加入 topOnly ====================
-    private fun currentConfig(): WallpaperConfig = WallpaperConfig(
-        blurRadius = blurRadius,
+    /** 当前配置（含 topOnly） */
+    private fun currentConfig(): WallpaperProcessor.Config = WallpaperProcessor.Config(
+        blurRadius = blurRadius.toInt(),
         extendRatio = extendRatio,
         featherWidth = featherWidth,
-        saturationBoost = saturationBoost,
-        brightnessOffset = brightnessOffset,
-        overlayStrength = overlayStrength,
-        topOnly = binding.cbTopOnly.isChecked  // ← 新增
+        topOnly = binding.cbTopOnly.isChecked
     )
-    // =============================================================================
 
-    // ★ 修复：防抖 + 排队，拖动滑块不再疯狂 cancel → 不再抛 "was cancelled"
+    /** 是否使用 NPU（从新增的 cbUseNpu 读取） */
+    private fun useNpu(): Boolean = binding.cbUseNpu?.isChecked == true
+
+    // ★ 防抖 + 排队
     private fun scheduleReprocess() {
         val src = originalBitmap ?: return
         shouldReprocess = true
-        if (reprocessJob?.isActive == true) {
-            // 正在处理中，本次只标记，等当前推理结束后再触发一次
-            return
-        }
+        if (reprocessJob?.isActive == true) return
         reprocessJob = lifecycleScope.launch {
-            delay(300) // 防抖
+            delay(300)
             while (shouldReprocess) {
                 shouldReprocess = false
                 try {
                     processImage(src)
                 } catch (e: Exception) {
-                    if (e is CancellationException) {
-                        // ★ 取消异常：静默，继续检查是否需要重处理（不弹 Toast）
-                        continue
-                    }
+                    if (e is CancellationException) continue
                     withContext(Dispatchers.Main) {
                         Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_SHORT).show()
                     }
@@ -216,19 +198,20 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    // ★ 调用 WallpaperProcessor.process（suspend，已在 Dispatchers.Default 执行）
     private suspend fun processImage(src: Bitmap) {
         withContext(Dispatchers.Main) { binding.progress.visibility = View.VISIBLE }
         try {
             val dm = resources.displayMetrics
-            // ★ NonCancellable：保证一次推理完整跑完，不被外部 cancel 打断
             val result = withContext(Dispatchers.IO) {
                 kotlinx.coroutines.withContext(NonCancellable) {
-                    getEngine().process(
+                    WallpaperProcessor.process(
                         context = this@MainActivity,
                         src = src,
                         targetW = dm.widthPixels,
                         targetH = targetHeight.takeIf { it > 0 } ?: dm.heightPixels,
-                        config = currentConfig()
+                        config = currentConfig(),
+                        useNpu = useNpu()   // ← 从 cbUseNpu 读取
                     )
                 }
             }
@@ -237,7 +220,6 @@ class MainActivity : AppCompatActivity() {
             binding.imgResult.setImageBitmap(result)
             binding.btnSave.isEnabled = true
         } catch (e: Exception) {
-            // 外部 cancel 不弹提示
             if (e !is CancellationException) {
                 withContext(Dispatchers.Main) {
                     Toast.makeText(this@MainActivity, "处理失败: ${e.message}", Toast.LENGTH_LONG).show()
@@ -272,12 +254,12 @@ class MainActivity : AppCompatActivity() {
     override fun onDestroy() {
         super.onDestroy()
         reprocessJob?.cancel()
-        engine?.release()
+        WallpaperProcessor.release()   // ★ 替代 engine?.release()
         originalBitmap?.recycle()
         processedBitmap?.recycle()
     }
 
-    /** 简易 SeekBar 监听器，子类按需重写 onProgressChanged */
+    /** 简易 SeekBar 监听器 */
     abstract class SimpleSeekBar : SeekBar.OnSeekBarChangeListener {
         override fun onStartTrackingTouch(seekBar: SeekBar?) {}
         override fun onStopTrackingTouch(seekBar: SeekBar?) {}
