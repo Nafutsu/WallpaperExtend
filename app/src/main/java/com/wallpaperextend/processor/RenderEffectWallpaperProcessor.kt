@@ -19,6 +19,7 @@ import android.media.ImageReader
 import android.os.Build
 import androidx.annotation.RequiresApi
 import com.wallpaperextend.processor.NPU.ExtendStrategy
+import com.wallpaperextend.processor.utils.ImageProcessingUtils
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -63,63 +64,35 @@ object RenderEffectWallpaperProcessor : ExtendStrategy {
     ): Bitmap {
         val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt()
 
-        val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-        val canvas = Canvas(out)
-        canvas.drawColor(sampleTopEdgeColor(src))
+        // 1. 采样顶部颜色（用于匹配）
+        val topAvg = ImageProcessingUtils.sampleTopAverageColor(src, 0.12f)
 
+        // 2. 生成延展区（模糊拉伸）
         val edgeH = max(50, (src.height * 0.1).toInt())
         val edgeSrc = Bitmap.createBitmap(src, 0, 0, src.width, min(edgeH, src.height))
-
         val stretched = Bitmap.createScaledBitmap(edgeSrc, targetW, extendH, true)
         val blurred = blurWithRenderEffect(stretched, config.blurRadius)
         stretched.recycle()
         edgeSrc.recycle()
 
-        // 色调蒙版
-        val topAvg = sampleTopEdgeColor(src)
-        val luminance = calculateLuminance(topAvg)
-        val overlayAlpha = (config.overlayStrength * 255).toInt()
-        val overlayColor = when {
-            luminance > 0.7 -> Color.argb(overlayAlpha, 255, 255, 255)
-            luminance < 0.3 -> Color.argb(overlayAlpha, 0, 0, 0)
-            else -> {
-                val tone = lighten(topAvg, config.brightnessOffset + 0.1f)
-                Color.argb(overlayAlpha, Color.red(tone), Color.green(tone), Color.blue(tone))
-            }
-        }
-
-        val tonePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = overlayColor }
-        canvas.drawRect(0f, 0f, targetW.toFloat(), extendH.toFloat(), tonePaint)
-        canvas.drawBitmap(blurred, 0f, 0f, null)
+        // 3. ★ 颜色匹配（使延展区颜色接近原图顶部）
+        val colorMatched = ImageProcessingUtils.matchColorToTarget(blurred, topAvg)
         blurred.recycle()
 
-        // 羽化：延展区底部渐变消失，和原图融合
-        val feather = config.featherWidth.coerceIn(50, extendH)
-        if (feather > 0) {
-            val fadePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-                shader = LinearGradient(
-                    0f, (extendH - feather).toFloat(),
-                    0f, extendH.toFloat(),
-                    Color.argb(255, 255, 255, 255),
-                    Color.argb(0, 255, 255, 255),
-                    Shader.TileMode.CLAMP
-                )
-                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
-            }
-            val layerId = canvas.saveLayer(
-                0f, (extendH - feather).toFloat(),
-                targetW.toFloat(), extendH.toFloat(),
-                null
-            )
-            canvas.drawRect(
-                0f, (extendH - feather).toFloat(),
-                targetW.toFloat(), extendH.toFloat(),
-                fadePaint
-            )
-            canvas.restoreToCount(layerId)
-        }
+        // 4. ★ 羽化（底部渐变透明）
+        val feathered = ImageProcessingUtils.applyFeather(colorMatched, config.featherWidth)
+        colorMatched.recycle()
 
-        // 画原图（从 extendH 开始，紧接延展区）
+        // 5. 输出画布
+        val out = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(out)
+        canvas.drawColor(Color.BLACK)
+
+        // 绘制延展区
+        canvas.drawBitmap(feathered, 0f, 0f, null)
+        feathered.recycle()
+
+        // 6. 绘制原图（下方）
         val srcScaledH = (targetW.toFloat() / src.width * src.height).toInt()
         canvas.drawBitmap(
             src, null,
