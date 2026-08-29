@@ -10,7 +10,7 @@ import android.graphics.Paint
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
 import android.graphics.Shader
-import com.wallpaperextend.processor.NPU.NPUImageProcessingUtils
+import com.wallpaperextend.processor.NPUImageProcessingUtils
 import com.wallpaperextend.processor.NPU.NpuExtendEngine
 import kotlin.math.ceil
 import kotlin.math.max

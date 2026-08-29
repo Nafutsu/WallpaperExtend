@@ -15,7 +15,7 @@ import android.media.ImageReader
 import android.os.Build
 import androidx.annotation.RequiresApi
 import com.wallpaperextend.processor.NPU.ExtendStrategy
-import com.wallpaperextend.processor.NPU.NPUImageProcessingUtils
+import com.wallpaperextend.processor.NPUImageProcessingUtils
 import kotlin.math.max
 import kotlin.math.min
 

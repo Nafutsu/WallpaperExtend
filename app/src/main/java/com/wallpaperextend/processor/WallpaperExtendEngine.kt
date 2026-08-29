@@ -7,8 +7,8 @@ import com.wallpaperextend.processor.NPU.NpuExtendEngine
 
 /**
  * ★ 兼容层（原 WallpaperExtendEngine）。
- * 方案 4：改用 WallpaperProcessor 作为统一入口，本类仅做兼容委托，
- * 不再重复定义 WallpaperConfig（以 WallpaperConfig.kt 为准）。
+ * 不再重复定义 WallpaperConfig —— 统一以 [WallpaperConfig]（WallpaperConfig.kt）为准。
+ * 内部委托给 [WallpaperProcessor]，移除旧依赖。
  */
 class WallpaperExtendEngine private constructor(
     private val context: Context
@@ -18,8 +18,9 @@ class WallpaperExtendEngine private constructor(
     private var npu: NpuExtendEngine? = null
 
     companion object {
-        /** 创建引擎（兼容旧调用：WallpaperExtendEngine.create(context)） */
-        fun create(context: Context): WallpaperExtendEngine = WallpaperExtendEngine(context.applicationContext)
+        /** 兼容旧调用：WallpaperExtendEngine.create(context) */
+        fun create(context: Context): WallpaperExtendEngine =
+            WallpaperExtendEngine(context.applicationContext)
     }
 
     /**
@@ -62,7 +63,7 @@ class WallpaperExtendEngine private constructor(
         npu = null
     }
 
-    // ===== 生命周期兼容（旧代码可能在 onDestroy 调用） =====
+    /** 生命周期兼容（旧代码可能在 onDestroy 调用） */
     fun bindToLifecycle(lifecycle: Lifecycle) {
         // 无需实际操作；NPU 引擎在 release() 时释放
     }
