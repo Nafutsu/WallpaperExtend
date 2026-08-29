@@ -12,6 +12,7 @@ import android.graphics.Rect
 import android.util.Log
 import com.wallpaperextend.processor.ExtendStrategy
 import com.wallpaperextend.WallpaperConfig
+import com.wallpaperextend.processor.utils.ImageProcessingUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
@@ -90,7 +91,6 @@ class NpuExtendEngine(
     ): Bitmap = withContext(Dispatchers.Default) {
         kotlinx.coroutines.withContext(NonCancellable) {
             if (!isInitialized) loadModels()
-
             val ortSession = session
                 ?: throw IllegalStateException("NPU model not loaded (isAvailable=${isAvailable()})")
 
@@ -143,39 +143,44 @@ class NpuExtendEngine(
             inputBitmap.recycle()
             maskBitmap.recycle()
 
-            // ---- ★ 拼接：只取 512x512 中对应"顶部延展区"的部分 ----
-            val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
-            val canvas = Canvas(finalBitmap)
-
-            // 1. 从 AI 输出中裁剪顶部（对应 mask 区域）
+            // ★ 裁剪并缩放延展区
             val extendAspect = targetW.toFloat() / extendH.toFloat()
             val aiCropH = (INPUT_SIZE / extendAspect).toInt().coerceAtLeast(1)
             val croppedAi = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, aiCropH)
+            generated512.recycle()
 
-            // 2. 缩放到实际延展区大小
             val scaledGenerated = Bitmap.createScaledBitmap(croppedAi, targetW, extendH, true)
-            canvas.drawBitmap(scaledGenerated, 0f, 0f, null)
+            croppedAi.recycle()
 
-            // 3. 原图画在延展区下方
+            // ★ 颜色匹配（采样原图顶部颜色）
+            val topAvg = ImageProcessingUtils.sampleTopAverageColor(src, 0.12f)
+            val colorMatched = ImageProcessingUtils.matchColorToTarget(scaledGenerated, topAvg)
+            scaledGenerated.recycle()
+
+            // ★ 羽化
+            val feathered = ImageProcessingUtils.applyFeather(colorMatched, config.featherWidth)
+            colorMatched.recycle()
+
+            // ★ 拼接
+            val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
+            val canvas = Canvas(finalBitmap)
+            canvas.drawBitmap(feathered, 0f, 0f, null)
+            feathered.recycle()
+
+            // 原图放在下方
             val bottomH = (targetH - extendH).coerceAtLeast(0)
             if (bottomH > 0) {
                 val bottomSrc = Bitmap.createScaledBitmap(scaledSrc, targetW, bottomH, true)
                 canvas.drawBitmap(bottomSrc, 0f, extendH.toFloat(), null)
-                if (bottomSrc !== scaledSrc) bottomSrc.recycle()
+                bottomSrc.recycle()
             }
+            scaledSrc.recycle()
 
-            // 4. 安全回收
-            if (finalBitmap !== scaledSrc) scaledSrc.recycle()
-            if (finalBitmap !== generated512) generated512.recycle()
-            if (finalBitmap !== croppedAi) croppedAi.recycle()
-            if (finalBitmap !== scaledGenerated) scaledGenerated.recycle()
-
-            finalBitmap
+            return@withContext finalBitmap
         }
     }
 
     // ===== Tensor 转换工具方法 =====
-
     private fun bitmapToTensor(bitmap: Bitmap): OnnxTensor {
         val w = bitmap.width
         val h = bitmap.height
