@@ -6,5 +6,6 @@ data class WallpaperConfig(
     val featherWidth: Int = 200,
     val saturationBoost: Float = 1.1f,
     val brightnessOffset: Float = 0.05f,
-    val overlayStrength: Float = 0.08f
+    val overlayStrength: Float = 0.08f,
+    val topOnly: Boolean = true   // ← 新增，控制延展方向，true=顶部延展
 )
