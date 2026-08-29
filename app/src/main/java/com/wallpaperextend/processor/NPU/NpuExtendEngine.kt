@@ -10,26 +10,14 @@ import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
-import com.wallpaperextend.processor.WallpaperConfig
+import com.wallpaperextend.processor.ExtendStrategy
+import com.wallpaperextend.WallpaperConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.nio.FloatBuffer
 
-/**
- * NPU 神经网络延展引擎（方案一 + 选择1：LaMa ONNX + 端侧推理）
- *
- * ★ 本次修复三处：
- *   1) 模型加载：assets → 内部存储文件 → createSession(路径)，不再 readBytes() 撑爆 Java 堆 (OOM)
- *   2) 推理受 NonCancellable 保护，拖动滑块取消上一协程时不会中断正在跑的推理
- *   3) 输出解析：LaMa 输出是完整修复图，直接缩放到目标尺寸作为延展区，不再错误截取
- *
- * ★ 崩溃修复：scaledSrc 在拼接完成前不能回收，否则 createScaledBitmap 抛
- *   "cannot use a recycled source in createBitmap"
- *
- * 执行提供者：默认让 ORT 自动选择（CPU / NNAPI）。NNAPI 不可用时自动降级 CPU。
- */
 class NpuExtendEngine(
     private val context: Context
 ) : ExtendStrategy {
@@ -57,18 +45,12 @@ class NpuExtendEngine(
 
     override fun name(): String = "NPU-LaMa"
 
-    /**
-     * 加载模型。
-     * ★ 修复 OOM：先把 assets 里的 .onnx 以流方式拷贝到内部存储，
-     *   再用文件路径创建 Session —— 不会在 Java 堆上分配 198MB。
-     */
     @Synchronized
     fun loadModels() {
         if (isInitialized) return
         try {
             env = OrtEnvironment.getEnvironment()
             val opts = OrtSession.SessionOptions().apply {
-                // NNAPI：走 NPU / GPU / DSP；不可用则降级 CPU
                 try {
                     addNnapi()
                 } catch (e: Throwable) {
@@ -90,8 +72,6 @@ class NpuExtendEngine(
                 }
                 Log.d(TAG, "Model copied: ${modelFile.absolutePath} (${modelFile.length()} bytes)")
             }
-
-            // ★ 关键：从文件路径加载，不占 Java 堆
             session = env!!.createSession(modelFile.absolutePath, opts)
             isInitialized = true
             Log.d(TAG, "✅ Model loaded successfully (NNAPI auto)")
@@ -108,16 +88,20 @@ class NpuExtendEngine(
         targetH: Int,
         config: WallpaperConfig
     ): Bitmap = withContext(Dispatchers.Default) {
-        // ★ NonCancellable：保证一次推理完整跑完，不被外部 cancel 打断
         kotlinx.coroutines.withContext(NonCancellable) {
             if (!isInitialized) loadModels()
+
             val ortSession = session
                 ?: throw IllegalStateException("NPU model not loaded (isAvailable=${isAvailable()})")
 
-            val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f)).toInt().coerceAtLeast(8)
+            val extendH = (targetH * config.extendRatio.coerceIn(0.05f, 0.6f))
+                .toInt()
+                .coerceAtLeast(8)
 
             // 原图适配目标宽度
-            val scaledH = (targetW.toFloat() / src.width * src.height).toInt().coerceAtLeast(1)
+            val scaledH = (targetW.toFloat() / src.width * src.height)
+                .toInt()
+                .coerceAtLeast(1)
             val scaledSrc = Bitmap.createScaledBitmap(src, targetW, scaledH, true)
 
             // ---- 构造 512x512 输入：原图贴底部，顶部为待延展区 ----
@@ -151,21 +135,28 @@ class NpuExtendEngine(
             val resultTensor = outputs[0] as OnnxTensor
             val generated512 = floatBufferToBitmap(resultTensor.floatBuffer, INPUT_SIZE, INPUT_SIZE)
 
-            // ★ 关闭 tensor / session result（不回收 scaledSrc，后面拼接还要用）
+            // 关闭 tensor
+            imageTensor.close()
+            maskTensor.close()
+            resultTensor.close()
+            outputs.close()
             inputBitmap.recycle()
             maskBitmap.recycle()
-            // scaledSrc.recycle()  ← 不能在这里回收！下面拼接还要用
 
-            // ---- ★ 拼接：模型输出是完整修复图，直接缩放到 (targetW × targetH) ----
-            // 这样延展区(顶部)与原图(底部)自然衔接，避免"截取一半拼接"导致的错位
+            // ---- ★ 拼接：只取 512x512 中对应"顶部延展区"的部分 ----
             val finalBitmap = Bitmap.createBitmap(targetW, targetH, Bitmap.Config.ARGB_8888)
             val canvas = Canvas(finalBitmap)
 
-            // 先画模型生成的完整延展背景
-            val scaledGenerated = Bitmap.createScaledBitmap(generated512, targetW, targetH, true)
+            // 1. 从 AI 输出中裁剪顶部（对应 mask 区域）
+            val extendAspect = targetW.toFloat() / extendH.toFloat()
+            val aiCropH = (INPUT_SIZE / extendAspect).toInt().coerceAtLeast(1)
+            val croppedAi = Bitmap.createBitmap(generated512, 0, 0, INPUT_SIZE, aiCropH)
+
+            // 2. 缩放到实际延展区大小
+            val scaledGenerated = Bitmap.createScaledBitmap(croppedAi, targetW, extendH, true)
             canvas.drawBitmap(scaledGenerated, 0f, 0f, null)
 
-            // 再叠加原图（从 extendH 开始，紧贴延展区下方）
+            // 3. 原图画在延展区下方
             val bottomH = (targetH - extendH).coerceAtLeast(0)
             if (bottomH > 0) {
                 val bottomSrc = Bitmap.createScaledBitmap(scaledSrc, targetW, bottomH, true)
@@ -173,9 +164,10 @@ class NpuExtendEngine(
                 if (bottomSrc !== scaledSrc) bottomSrc.recycle()
             }
 
-            // ---- ★ 所有引用 scaledSrc / generated512 的地方都用完了，现在才回收 ----
+            // 4. 安全回收
             if (finalBitmap !== scaledSrc) scaledSrc.recycle()
             if (finalBitmap !== generated512) generated512.recycle()
+            if (finalBitmap !== croppedAi) croppedAi.recycle()
             if (finalBitmap !== scaledGenerated) scaledGenerated.recycle()
 
             finalBitmap
@@ -184,7 +176,6 @@ class NpuExtendEngine(
 
     // ===== Tensor 转换工具方法 =====
 
-    /** Bitmap [0,255] → FloatBuffer [-1,1]，形状 [1,3,H,W] (NCHW) */
     private fun bitmapToTensor(bitmap: Bitmap): OnnxTensor {
         val w = bitmap.width
         val h = bitmap.height
@@ -200,7 +191,6 @@ class NpuExtendEngine(
         return OnnxTensor.createTensor(env!!, buffer, longArrayOf(1, 3, h.toLong(), w.toLong()))
     }
 
-    /** Alpha8 mask → FloatBuffer [0,1]，形状 [1,1,H,W] */
     private fun maskToTensor(bitmap: Bitmap): OnnxTensor {
         val w = bitmap.width
         val h = bitmap.height
@@ -214,10 +204,6 @@ class NpuExtendEngine(
         return OnnxTensor.createTensor(env!!, buffer, longArrayOf(1, 1, h.toLong(), w.toLong()))
     }
 
-    /**
-     * ONNX floatBuffer → Bitmap
-     * 布局：[1, 3, H, W] = R 平面 + G 平面 + B 平面，值 ∈ [-1, 1]
-     */
     private fun floatBufferToBitmap(buffer: FloatBuffer, w: Int, h: Int): Bitmap {
         val bitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
         val pixels = IntArray(w * h)
